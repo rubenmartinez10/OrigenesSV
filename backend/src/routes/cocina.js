@@ -5,7 +5,7 @@ import { ahora } from '../lib/reloj.js';
 import { bitacora, notificar } from '../lib/registro.js';
 import { exigir } from '../lib/permisos.js';
 import {
-  cfg, r2, recetas, uso, cabe, disponibles, estimado, consumir, costoReservas, enTurno, turnosDe,
+  cfg, r2, esperaCola, recetas, uso, cabe, disponibles, estimado, consumir, costoReservas, enTurno, turnosDe,
 } from '../lib/negocio.js';
 import { cargarPedidos, cargarPedido, cargarSolicitudes } from '../lib/consultas.js';
 
@@ -37,9 +37,12 @@ jefe.get('/cola', async (req, res) => {
   const cocineros = cocs.map((x) => {
     const ocupado = pedidos.find((p) => p.cocinero === x.id && p.estado === 'Preparando') || null;
     const cola = pedidos.filter((p) => p.cocinero === x.id && p.estado === 'Asignado').sort((a, b) => (a.asignado || 0) - (b.asignado || 0));
-    return { ...x, ocupado: ocupado && { id: ocupado.id, num: ocupado.num }, cola: cola.map((p) => ({ id: p.id, num: p.num })) };
+    const activos = pedidos.filter((p) => p.cocinero === x.id && ['Asignado', 'Preparando'].includes(p.estado));
+    return { ...x, ocupado: ocupado && { id: ocupado.id, num: ocupado.num }, cola: cola.map((p) => ({ id: p.id, num: p.num })), carga: activos.length };
   });
-  res.json({ pedidos, cocineros });
+  const max = (await cfg(DB)).cocina_simultaneos || 3;
+  const sugerido = [...cocineros].sort((a, b) => a.carga - b.carga || a.id - b.id)[0]?.id || null;
+  res.json({ pedidos, cocineros, max, sugerido });
 });
 
 jefe.post('/pedidos/:id/aceptar', async (req, res) => {
@@ -52,6 +55,25 @@ jefe.post('/pedidos/:id/aceptar', async (req, res) => {
     await bitacora(c, u, { accion: 'pedido.aceptar', elemento: nom(p), sucursal: p.sucursal_id });
   });
   res.json({ ok: true });
+});
+
+/** Acepta varios pedidos nuevos de una vez (por orden de llegada). */
+jefe.post('/pedidos/aceptar-varios', async (req, res) => {
+  const u = req.usuario;
+  exigir(u, 'cocina', 'decide', u.sucursal);
+  const ids = (req.body?.ids || []).map(Number).filter(Number.isInteger);
+  si(!ids.length, 'No hay pedidos para aceptar');
+  let n = 0;
+  await tx(async (c) => {
+    for (const id of ids) {
+      const p = await pedidoDeSucursal(c, u.sucursal, id);
+      if (p.estado !== 'Creado') continue;
+      await c.query(`UPDATE pedidos SET estado = 'Aceptado', aceptado = $2 WHERE id = $1`, [p.id, ts(ahora())]);
+      await bitacora(c, u, { accion: 'pedido.aceptar', elemento: nom(p), sucursal: p.sucursal_id });
+      n++;
+    }
+  });
+  res.json({ ok: true, aceptados: n });
 });
 
 jefe.post('/pedidos/:id/rechazar', async (req, res) => {
@@ -125,6 +147,7 @@ jefe.post('/solicitudes/:id/aceptar-reposicion', async (req, res) => {
     await c.query('SELECT pg_advisory_xact_lock(1000 + $1)', [u.sucursal]);
     const x = await solicitudPendiente(c, u.sucursal, req.params.id, 'Reposición');
     const p = await cargarPedido(c, x.pedido_id);
+    si(p.estado === 'Cobrado', 'El pedido ya se cobró: después del cobro no se reponen platillos');
     const l = p.lineas.find((z) => z.orden === x.linea_orden);
     const ls = [{ pr: l.pr, cant: l.cant, extras: l.extras.map((e) => e.pr) }];
     const rec = await recetas(c);
@@ -132,11 +155,11 @@ jefe.post('/solicitudes/:id/aceptar-reposicion', async (req, res) => {
     si(!cabe(u2, (await disponibles(c, u.sucursal)).disp), 'No alcanzan los insumos para reponer');
     const k = await cfg(c);
     const { rows: tiempos } = await c.query('SELECT id, tiempo_min AS tiempo FROM productos WHERE id = ANY($1)', [[l.pr, ...ls[0].extras]]);
-    const est = estimado(ls, Object.fromEntries(tiempos.map((t) => [t.id, t])), k);
+    const est = estimado(ls, Object.fromEntries(tiempos.map((t) => [t.id, t])), k) + await esperaCola(c, u.sucursal, k);
     const { rows: ins } = await c.query(
-      `INSERT INTO pedidos (sucursal_id, mesero_id, tipo, mesa, cliente, estado, total, est_seg, reposicion_de, creado)
-       VALUES ($1,$2,$3,$4,$5,'Creado',0,$6,$7,$8) RETURNING id`,
-      [p.suc, p.mesero, p.tipo, p.mesa, p.ref, est, p.id, ts(ahora())]);
+      `INSERT INTO pedidos (sucursal_id, mesero_id, tipo, mesa, cliente, estado, total, est_seg, reposicion_de, creado, direccion, telefono)
+       VALUES ($1,$2,$3,$4,$5,'Creado',0,$6,$7,$8,$9,$10) RETURNING id`,
+      [p.suc, p.mesero, p.tipo, p.mesa, p.ref, est, p.id, ts(ahora()), p.direccion, p.telefono]);
     const nuevo = ins[0].id;
     const { rows: ln } = await c.query(
       'INSERT INTO pedido_lineas (pedido_id, orden, producto_id, nombre, cantidad, precio_unit) VALUES ($1,0,$2,$3,$4,$5) RETURNING id',
@@ -160,11 +183,16 @@ jefe.post('/solicitudes/:id/autorizar-cancelacion', async (req, res) => {
     si(['Cobrado', 'Cancelado', 'Rechazado'].includes(p.estado), 'El pedido ya está cerrado');
     await c.query(`UPDATE pedidos SET estado = 'Cancelado', motivo_cancel = $2, cancelado = $3 WHERE id = $1`, [p.id, x.motivo, ts(ahora())]);
     await c.query(`UPDATE solicitudes SET estado = 'Autorizada', decidio_id = $2, cierre = $3 WHERE id = $1`, [x.id, u.id, ts(ahora())]);
+    let cargo = 0;
     if (p.consumido) {
+      // los insumos ya se usaron: se registran como merma y el cliente los paga (costo + IVA)
+      const costo = await costoReservas(c, p.id, u.sucursal);
+      cargo = r2(costo * (1 + (await cfg(c)).iva_pct / 100));
+      await c.query('UPDATE pedidos SET cargo_cancel = $2 WHERE id = $1', [p.id, cargo]);
       await c.query(`INSERT INTO mermas (sucursal_id, fecha, tipo, pedido_id, motivo, costo, registro_id) VALUES ($1,$2,'Cancelación autorizada',$3,$4,$5,$6)`,
-        [u.sucursal, ts(ahora()), p.id, x.motivo, await costoReservas(c, p.id, u.sucursal), u.id]);
+        [u.sucursal, ts(ahora()), p.id, `${x.motivo} · se cobran al cliente $${cargo.toFixed(2)}`, costo, u.id]);
     }
-    await notificar(c, 'mesero', u.sucursal, 'Cancelación autorizada', `#${p.num}`);
+    await notificar(c, 'mesero', u.sucursal, 'Cancelación autorizada', cargo ? `#${p.num} · cobra $${cargo.toFixed(2)} de insumos usados` : `#${p.num}`);
     await notificar(c, 'cocinero', u.sucursal, 'Pedido cancelado', `#${p.num}`);
     await bitacora(c, u, { accion: 'cancelacion.autorizar', elemento: nom(p), motivo: x.motivo, sucursal: u.sucursal });
   });
@@ -221,7 +249,9 @@ cocinero.get('/mi-pedido', async (req, res) => {
   const mis = await cargarPedidos(DB, `p.cocinero_id = $1 AND p.estado IN ('Asignado','Preparando')`, [u.id], 'p.asignado');
   const actual = mis.find((p) => p.estado === 'Preparando') || mis[0] || null;
   const cancelado = (await cargarPedidos(DB, `p.cocinero_id = $1 AND p.estado = 'Cancelado' AND NOT p.visto_cocinero`, [u.id], 'p.cancelado'))[0] || null;
-  res.json({ actual, cola: mis.filter((p) => p !== actual), cancelado });
+  const haciendo = mis.filter((p) => p.estado === 'Preparando');
+  const max = (await cfg(DB)).cocina_simultaneos || 3;
+  res.json({ actual, haciendo, max, cola: mis.filter((p) => p.estado === 'Asignado'), cancelado });
 });
 
 async function pedidoMio(c, u, id) {
@@ -236,8 +266,9 @@ cocinero.post('/pedidos/:id/iniciar', async (req, res) => {
   await tx(async (c) => {
     const p = await pedidoMio(c, u, req.params.id);
     si(p.estado !== 'Asignado', 'Ese pedido ya se inició');
-    const otro = await c.query(`SELECT num FROM pedidos WHERE cocinero_id = $1 AND estado = 'Preparando'`, [u.id]);
-    si(otro.rowCount, `Termina el pedido #${otro.rows[0]?.num} antes de iniciar otro`);
+    const max = (await cfg(c)).cocina_simultaneos || 3;
+    const otros = await c.query(`SELECT num FROM pedidos WHERE cocinero_id = $1 AND estado = 'Preparando'`, [u.id]);
+    si(otros.rowCount >= max, `Ya preparas ${max} pedidos a la vez. Termina uno antes de iniciar otro`);
     await consumir(c, p.id, p.sucursal_id);
     await c.query(`UPDATE pedidos SET estado = 'Preparando', iniciado = $2 WHERE id = $1`, [p.id, ts(ahora())]);
     await bitacora(c, u, { accion: 'pedido.iniciar', elemento: nom(p), sucursal: p.sucursal_id });
@@ -252,6 +283,7 @@ cocinero.post('/pedidos/:id/terminar', async (req, res) => {
     const p = await pedidoMio(c, u, req.params.id);
     si(p.estado !== 'Preparando', 'Primero inicia la preparación');
     await c.query(`UPDATE pedidos SET estado = 'Listo', terminado = $2 WHERE id = $1`, [p.id, ts(ahora())]);
+    await notificar(c, 'mesero', p.sucursal_id, 'Pedido listo', `#${p.num} · ${donde(p)}`);
     await bitacora(c, u, { accion: 'pedido.listo', elemento: nom(p), sucursal: p.sucursal_id });
   });
   res.json({ ok: true });

@@ -6,10 +6,10 @@ import { $, fmt } from '../../lib/formato.js';
 import { donde } from '../../lib/pedidos.js';
 import { useDatos } from '../../context/Sesion.jsx';
 import { useDialogos } from '../../context/Dialogos.jsx';
-import { Btn, Card, Cargando, Chip, CirculoIcono, Fila, Panel, Stat, Stats, Stack, Kv } from '../../components/ui.jsx';
+import { Btn, BanRojo, Ban, Card, Cargando, Chip, CirculoIcono, Fila, Panel, Stat, Stats, Stack, Kv, Mut } from '../../components/ui.jsx';
 
 export default function MiCaja() {
-  const { confirmar, accion } = useDialogos();
+  const { confirmar, motivo, accion } = useDialogos();
   const navigate = useNavigate();
   const { datos } = useDatos('/mesero/caja', { cada: 8000 });
   const [fondo, setFondo] = useState('0');
@@ -25,7 +25,7 @@ export default function MiCaja() {
         const df = x.declarado - (x.esp?.Efectivo ?? 0);
         const tono = /^Aprob/.test(x.estado) ? 'ok' : /Rechaz|Observ/.test(x.estado) ? 'er' : 'wa';
         return (
-          <Fila key={x.id} ico={tono === 'ok' ? 'check' : tono === 'er' ? 'x' : 'clock'} tono={tono} t={fmt(x.cerrada)} chips={<Chip t={x.estado} o={tono} />}
+          <Fila key={x.id} ico={tono === 'ok' ? 'check' : tono === 'er' ? 'x' : 'clock'} tono={tono} t={fmt(x.cerrada)} chips={<><Chip t={x.estado} o={tono} />{x.tardeMin > 0 && <Chip t={`Abrió ${x.tardeMin} min tarde`} o="er" />}{x.fueraTurno && <Chip t="Fuera de turno" o="wa" />}</>}
             s={`Efectivo declarado ${$(x.declarado)}`} m={x.comentario ? `Gerente: ${x.comentario}` : ''}
             der={<span className={df === 0 ? '' : df < 0 ? 'tw:text-er' : 'tw:text-ok'}>{df > 0 ? '+' : ''}{$(df)}</span>}
             onClick={x.comentario ? () => setVer(x) : undefined} />
@@ -34,9 +34,24 @@ export default function MiCaja() {
     </Stack>
   );
 
+  const t = datos.turno;
+  const sol = datos.solicitud;
+  const pedirApertura = async () => {
+    const m = await motivo({ titulo: 'Motivo para abrir la caja fuera de tu turno' });
+    if (m) accion(() => api.post('/mesero/caja/solicitar-apertura', { motivo: m }), 'Solicitud enviada al gerente');
+  };
+
   if (!c) {
     return (
       <Stack>
+        <Card className="tw:flex tw:flex-wrap tw:items-center tw:gap-2.5">
+          <b>Tu turno de hoy</b><Chip t={t.texto} o={t.dentro ? 'ok' : 'wa'} />
+          {!t.dentro && <Chip t="Fuera de turno" o="er" />}
+        </Card>
+        {!t.dentro && !sol && <BanRojo>Estás fuera de tu turno. Para abrir la caja necesitas la autorización del gerente.</BanRojo>}
+        {sol?.estado === 'Solicitada' && <Ban>Solicitud enviada al gerente: espera su respuesta. Motivo: {sol.motivo}</Ban>}
+        {sol?.estado === 'Rechazada' && <BanRojo>El gerente rechazó tu solicitud: {sol.rechazo?.motivo}</BanRojo>}
+        {sol?.estado === 'Aprobada' && <Ban>El gerente autorizó la apertura: ya puedes abrir tu caja.</Ban>}
         <Card className="tw:flex tw:flex-wrap tw:items-center tw:gap-4">
           <CirculoIcono ic="lock" tono="g" className="tw:w-[52px] tw:h-[52px] tw:rounded-2xl" />
           <div className="tw:flex-1 tw:min-w-40 tw:flex tw:flex-col tw:gap-1">
@@ -44,7 +59,9 @@ export default function MiCaja() {
           </div>
           <div className="tw:flex tw:items-center tw:gap-2.5">
             <Form.Control inputMode="decimal" placeholder="Fondo inicial" value={fondo} onChange={(e) => setFondo(e.target.value)} className="tw:w-[130px]" aria-label="Fondo inicial" />
-            <Btn v="p" onClick={() => accion(() => api.post('/mesero/caja/abrir', { fondo: Number(fondo) }), 'Caja abierta')}>Abrir caja</Btn>
+            {!t.dentro && sol?.estado !== 'Aprobada'
+              ? <Btn v="p" disabled={sol?.estado === 'Solicitada'} onClick={pedirApertura}>Solicitar al gerente</Btn>
+              : <Btn v="p" onClick={() => accion(() => api.post('/mesero/caja/abrir', { fondo: Number(fondo) }), 'Caja abierta')}>Abrir caja</Btn>}
           </div>
         </Card>
         {historial}
@@ -67,10 +84,14 @@ export default function MiCaja() {
 
   return (
     <Stack>
+      {c.tardeMin > 0 && <BanRojo>Abriste la caja {c.tardeMin} min después del inicio de tu turno. Queda reportado al gerente.</BanRojo>}
       <Card className="tw:flex tw:flex-wrap tw:items-center tw:gap-4">
         <CirculoIcono ic="dollar" tono="ok" className="tw:w-[52px] tw:h-[52px] tw:rounded-2xl" />
         <div className="tw:flex-1 tw:min-w-40 tw:flex tw:flex-col tw:gap-1">
-          <div className="tw:flex tw:items-center tw:gap-2"><b>Caja</b><Chip t="Abierta" o="ok" /></div>
+          <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-2"><b>Caja</b><Chip t="Abierta" o="ok" />
+            {c.tardeMin > 0 && <Chip t={`Abrió ${c.tardeMin} min tarde`} o="er" />}
+            {c.fueraTurno && <Chip t="Fuera de turno (autorizada)" o="wa" />}
+          </div>
           <small className="tw:text-tx2">{c.ventas} {c.ventas === 1 ? 'venta' : 'ventas'} en el turno</small>
         </div>
         <Btn v="p" onClick={terminar}>Terminar turno</Btn>

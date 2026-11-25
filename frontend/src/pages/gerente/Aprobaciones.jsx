@@ -5,7 +5,7 @@ import { $, fFecha, fmt, r2 } from '../../lib/formato.js';
 import { corr } from '../../lib/pedidos.js';
 import { useDatos, useSesion, useAhora } from '../../context/Sesion.jsx';
 import { useDialogos } from '../../context/Dialogos.jsx';
-import { Ban, Btn, Campo, Card, Cargando, Chip, Err, Fila, Kv, Mut, Panel, Pildoras, Stack, Tabla, Vacio } from '../../components/ui.jsx';
+import { Ban, BanRojo, Btn, Campo, Card, Cargando, Chip, Err, Fila, Kv, Mut, Panel, Pildoras, Stack, Tabla, Vacio } from '../../components/ui.jsx';
 import { ChipCompra, CompraResumen, LotesRecibidos, lineasTxt, recepcionParcial } from '../../components/Compras.jsx';
 import { DetalleConteo } from '../bodega/Conteo.jsx';
 
@@ -25,7 +25,7 @@ function Productos() {
   const P = Object.fromEntries(cat.productos.map((p) => [p.id, p]));
   const x = ver && datos.find((s) => s.id === ver);
   const d = x?.datos || {};
-  const precioOk = x?.tipo !== 'Producto nuevo' || (+precio > 0 && (x.costo.incompleto || +precio / (1 + (config?.iva ?? 13) / 100) > x.costo.costo));
+  const precioOk = x?.tipo !== 'Producto nuevo' || (+precio > 0 && (x.costo.incompleto || +precio / (1 + (config?.iva ?? 13) / 100) >= x.costo.costo * (1 + (config?.gananciaMin ?? 30) / 100)));
   const aprobar = async () => {
     if (!(await confirmar({ titulo: `¿Aprobar «${x.nombre}»?`, texto: 'Pasa a Aprobado por gerente de sucursal y se envía al gerente general. No pide clave.', verbo: 'Aprobar' }))) return;
     if (await accion(() => api.post(`/gerente/propuestas/${x.id}/aprobar`, { precio: +precio }), 'Enviada al gerente general')) setVer(null);
@@ -52,7 +52,7 @@ function Productos() {
                 : 'Se toma el precio más alto posible de cada materia prima en esta sucursal (todos los proveedores, con su intervalo de variación). Sin IVA.'}</Mut>
               <b>Precio propuesto (IVA incluido)</b>
               <Form.Control type="number" min="0" step="0.05" placeholder="Ej. 1.50" value={precio} onChange={(e) => setPrecio(e.target.value)} />
-              <Mut>Tú defines el precio. Sin IVA debe superar el costo.</Mut>
+              <Mut>Tú defines el precio. Sin IVA debe dejar al menos {config?.gananciaMin ?? 30} % de ganancia sobre el costo.</Mut>
             </Card>
             <h4 className="tw:text-sm tw:m-0">Receta</h4>
             <Tabla cols={['Ingrediente', 'Cantidad', '']} filas={(d.ings || []).map((r) => [mn(r.mp, M), r.cant, x.sinProveedor.includes(r.mp) ? <Chip t="Proveedor en trámite" o="wa" /> : ''])} />
@@ -131,10 +131,10 @@ function Recepcion() {
   const enviarDesc = async () => {
     if (+desc.monto > maxDesc) return setDesc({ ...desc, er: `El monto no puede superar ${$(maxDesc)}` });
     try {
-      await api.post(`/gerente/compras/${c.id}/descuento`, desc);
+      const r = await api.post(`/gerente/compras/${c.id}/descuento`, desc);
       setDesc(null);
       setVer(null);
-      accion(async () => {}, 'Enviada al gerente general');
+      accion(async () => {}, `${r.proveedor} aplicó un ${r.tipo.toLowerCase()} de ${$(r.monto)} según su política`);
     } catch (e) { setDesc({ ...desc, er: e.message }); }
   };
   const puedeCancelar = c && ['Aceptada por gerente', 'En camino'].includes(c.estado) && !c.llego;
@@ -151,7 +151,7 @@ function Recepcion() {
       {c && (
         <Panel show onHide={() => setVer(null)} titulo={`Compra #${c.id}`} estado={c.estado}
           pie={c.estado === 'Recibida' ? [
-            <Btn key="d" onClick={() => setDesc({ tipo: 'Descuento', monto: '', motivo: '', er: '' })}>Solicitar descuento o reembolso</Btn>,
+            <Btn key="d" onClick={() => setDesc({ monto: '', motivo: '', er: '' })}>Reclamar al proveedor</Btn>,
             <Btn key="v" onClick={devolver}>{bod ? 'Aprobar devolución' : 'Devolver mercancía'}</Btn>,
             <Btn key="a" v="p" onClick={() => setAceptar({ pend: 'seguir' })}>{bod ? 'Quedarme con la mercancía' : 'Aceptar mercancía'}</Btn>,
           ] : [<Btn key="c" v="red" disabled={!puedeCancelar} onClick={cancelar}>Cancelar compra</Btn>,
@@ -186,9 +186,8 @@ function Recepcion() {
       <Modal show={!!desc} onHide={() => setDesc(null)} centered>
         {desc && (
           <Modal.Body>
-            <h3>Solicitar descuento o reembolso</h3>
-            <p className="tw:text-tx2 tw:m-0">Lo decide el gerente general. Si lo aprueba, baja el monto de la factura o queda crédito a favor con el proveedor.</p>
-            <Campo l="Tipo"><Form.Select value={desc.tipo} onChange={(e) => setDesc({ ...desc, tipo: e.target.value })}><option>Descuento</option><option>Reembolso</option></Form.Select></Campo>
+            <h3>Reclamar descuento o reembolso al proveedor</h3>
+            <p className="tw:text-tx2 tw:m-0">No pasa por el gerente general: el proveedor compensa según su política (descuento o reembolso). Si la factura no se ha pagado, baja su monto; si ya se pagó, queda saldo a favor.</p>
             <Campo l="Monto"><Form.Control type="number" min={0.01} step="0.01" placeholder={`Monto, máx. ${$(maxDesc)}`} value={desc.monto} onChange={(e) => setDesc({ ...desc, monto: e.target.value })} /></Campo>
             <Campo l="Motivo"><Form.Control as="textarea" rows={3} placeholder="Motivo (mín. 10 caracteres)" value={desc.motivo} onChange={(e) => setDesc({ ...desc, motivo: e.target.value })} /></Campo>
             <Err>{desc.er}</Err>
@@ -263,12 +262,50 @@ function Ofertas() {
 
 /* ---------- 5.7 cierres de caja ---------- */
 let vistaCaja = 'pend';
+const OPC_CAJA = [['pend', 'Cierres pendientes'], ['abiertas', 'Cajas abiertas'], ['aperturas', 'Aperturas fuera de turno'], ['hist', 'Historial']];
+const avisosCaja = (x) => (
+  <>
+    {x.tardeMin > 0 && <Chip t={`Abrió ${x.tardeMin} min tarde`} o="er" />}
+    {x.fueraTurno && <Chip t="Fuera de turno" o="er" />}
+    {x.pasadaMin > 0 && <Chip t={`Pasó ${x.pasadaMin} min del turno`} o="er" />}
+  </>
+);
+
+/** Solicitudes de los meseros para abrir caja fuera de su turno. */
+function Aperturas({ pildoras }) {
+  const { confirmar, motivo, accion } = useDialogos();
+  const { datos } = useDatos('/gerente/aperturas');
+  if (!datos) return <Cargando />;
+  const aprobar = async (x) => {
+    if (await confirmar({ titulo: `¿Autorizar a ${x.meseroNombre} a abrir caja?`, texto: 'La caja quedará marcada como abierta fuera de turno.', verbo: 'Autorizar' })) accion(() => api.post(`/gerente/aperturas/${x.id}/aprobar`), 'Apertura autorizada');
+  };
+  const rechazar = async (x) => {
+    const m = await motivo({ titulo: 'Motivo del rechazo' });
+    if (m) accion(() => api.post(`/gerente/aperturas/${x.id}/rechazar`, { motivo: m }), 'Solicitud rechazada');
+  };
+  return (
+    <Stack>
+      {pildoras}
+      {datos.length ? datos.map((x) => (
+        <Card key={x.id} className="tw:flex tw:flex-col tw:gap-2">
+          <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-2"><b>{x.meseroNombre}</b><Chip t={x.estado === 'Solicitada' ? 'Por decidir' : x.estado} o={x.estado === 'Aprobada' || x.estado === 'Usada' ? 'ok' : x.estado === 'Rechazada' ? 'er' : 'wa'} /><Chip t="Fuera de turno" o="er" /></div>
+          <Mut>Su turno hoy: {x.turno} · {fmt(x.fecha)}</Mut>
+          <div>Motivo: {x.motivo}</div>
+          {x.rechazo?.motivo && <Mut>Rechazo: {x.rechazo.motivo}</Mut>}
+          {x.estado === 'Solicitada' && <div className="tw:flex tw:justify-end tw:gap-2"><Btn onClick={() => rechazar(x)}>Rechazar</Btn><Btn v="p" onClick={() => aprobar(x)}>Autorizar apertura</Btn></div>}
+        </Card>
+      )) : <Vacio ic="check">No hay solicitudes de apertura</Vacio>}
+    </Stack>
+  );
+}
+
 function Caja() {
   const { confirmar, motivo, accion } = useDialogos();
   const [v, setV] = useState(vistaCaja);
-  const { datos } = useDatos(`/gerente/cajas?vista=${v}`);
+  const { datos } = useDatos(v === 'aperturas' ? null : `/gerente/cajas?vista=${v}`);
   const [ver, setVer] = useState(null);
   const { datos: ventas } = useDatos(ver ? `/gerente/cajas/${ver}/ventas` : null);
+  if (v === 'aperturas') return <Aperturas pildoras={<Pildoras opciones={OPC_CAJA} valor={v} onChange={(x) => { vistaCaja = x; setV(x); setVer(null); }} />} />;
   if (!datos) return <Cargando />;
   const dif = (c) => r2((c.declarado || 0) - (c.esp.Efectivo || 0));
   const chipDif = (c) => (c.estado === 'Observada' ? <Chip t="Observada" o="er" /> : dif(c) === 0 ? <Chip t="Cuadra" o="ok" />
@@ -286,16 +323,20 @@ function Caja() {
   const dv = (ventas || []).filter((x) => x.devuelto > 0);
   return (
     <Stack>
-      <Pildoras opciones={[['pend', 'Pendientes'], ['hist', 'Historial']]} valor={v} onChange={(x) => { vistaCaja = x; setV(x); setVer(null); }} />
+      <Pildoras opciones={OPC_CAJA} valor={v} onChange={(x) => { vistaCaja = x; setV(x); setVer(null); }} />
       {datos.length ? (
-        <Tabla cols={['Mesero', 'Fecha y turno', 'Cierre', 'Diferencia']} filas={datos.map((x) => ({
-          onClick: () => setVer(x.id), celdas: [x.meseroNombre, fFecha(x.abierta), fmt(x.cerrada), <>{chipDif(x)} {x.estado === 'Aprobada' && v === 'hist' && <Chip t="Aprobada" o="ok" />}</>],
+        <Tabla cols={['Mesero', 'Fecha y turno', v === 'abiertas' ? 'Estado' : 'Cierre', v === 'abiertas' ? 'Reporte' : 'Diferencia']} filas={datos.map((x) => ({
+          onClick: () => setVer(x.id), celdas: [x.meseroNombre, fFecha(x.abierta), v === 'abiertas' ? <Chip t="Abierta" o="ok" /> : fmt(x.cerrada),
+            <>{v === 'abiertas' ? null : chipDif(x)} {x.estado === 'Aprobada' && v === 'hist' && <Chip t="Aprobada" o="ok" />}{avisosCaja(x)}</>],
         }))} />
-      ) : <Vacio ic="check">No hay cierres {v === 'pend' ? 'pendientes' : 'en el historial'}</Vacio>}
+      ) : <Vacio ic="check">{v === 'abiertas' ? 'No hay cajas abiertas' : `No hay cierres ${v === 'pend' ? 'pendientes' : 'en el historial'}`}</Vacio>}
       {c && (
         <Panel show onHide={() => setVer(null)} titulo={`Caja de ${c.meseroNombre}`} estado={c.estado === 'Pendiente de aprobación' ? 'Solicitada' : c.estado}
-          ro={c.estado !== 'Pendiente de aprobación'} pie={[<Btn key="o" onClick={observar}>Observar cierre</Btn>, <Btn key="a" v="p" onClick={aprobar}>Aprobar cierre</Btn>]}>
-          <Kv pares={[['Fondo inicial', $(c.fondo)], ['Cierre', fmt(c.cerrada)]]} />
+          ro={c.estado !== 'Pendiente de aprobación'} pie={c.estado === 'Abierta' ? [] : [<Btn key="o" onClick={observar}>Observar cierre</Btn>, <Btn key="a" v="p" onClick={aprobar}>Aprobar cierre</Btn>]}>
+          {c.tardeMin > 0 && <BanRojo>Abrió la caja {c.tardeMin} min después del inicio de su turno.</BanRojo>}
+          {c.fueraTurno && <BanRojo>Abrió la caja fuera de su turno con tu autorización.</BanRojo>}
+          {c.pasadaMin > 0 && <BanRojo>Sigue con la caja abierta {c.pasadaMin} min después de terminar su turno.</BanRojo>}
+          <Kv pares={[['Fondo inicial', $(c.fondo)], ['Abrió', fmt(c.abierta)], ['Cierre', c.cerrada ? fmt(c.cerrada) : 'Aún abierta']]} />
           <Tabla cols={['Método', 'Esperado', 'Declarado', 'Diferencia']} filas={[
             ['Efectivo', $(c.esp.Efectivo), $(c.declarado), $(dif(c))], ['Tarjeta', $(c.esp.Tarjeta), $(c.esp.Tarjeta), $(0)], ['Bitcoin', $(c.esp.Bitcoin), $(c.esp.Bitcoin), $(0)]]} />
           <Mut>El efectivo esperado es el fondo más las ventas en efectivo. Tarjeta y Bitcoin vienen de los cobros registrados.</Mut>
@@ -386,9 +427,9 @@ function Solicitudes() {
 /* ---------- 5.12 historial de aprobaciones ---------- */
 const ACC = {
   'compra.aceptar.gerente': 'Aceptó una compra', 'compra.rechazar.gerente': 'Denegó una compra', 'compra.aceptar_mercancia': 'Aceptó mercancía', 'compra.devolver': 'Devolvió mercancía',
-  'compra.cancelar': 'Canceló una compra', 'compra.solicitar_descuento': 'Pidió descuento o reembolso', 'oferta.autorizar': 'Autorizó una oferta', 'oferta.rechazar': 'Rechazó una oferta',
+  'compra.cancelar': 'Canceló una compra', 'compra.solicitar_descuento': 'Reclamó descuento o reembolso al proveedor', 'oferta.autorizar': 'Autorizó una oferta', 'oferta.rechazar': 'Rechazó una oferta',
   'producto.inhabilitar': 'Inhabilitó un producto', 'materia.inhabilitar': 'Aprobó inhabilitar una materia prima', 'despido.aprobar': 'Aprobó un despido', 'solicitud.rechazar': 'Rechazó una solicitud',
-  'menu.solicitar': 'Pidió agregar un producto al menú', 'caja.aprobar': 'Aprobó un cierre de caja', 'caja.observar': 'Observó un cierre de caja', 'conteo.aprobar': 'Aprobó un conteo',
+  'menu.solicitar': 'Pidió agregar un producto al menú', 'menu.solicitar_quitar': 'Pidió quitar un producto del menú', 'despido.solicitar': 'Solicitó un despido', 'caja.aprobar': 'Aprobó un cierre de caja', 'caja.observar': 'Observó un cierre de caja', 'conteo.aprobar': 'Aprobó un conteo',
   'conteo.rechazar': 'Rechazó un conteo', 'propuesta.aprobar.gerente': 'Aprobó una propuesta', 'propuesta.rechazar.gerente': 'Rechazó una propuesta', 'merma.registrar': 'Registró una merma',
   'precio.solicitar': 'Pidió un cambio de precio', 'personal.solicitar': 'Pidió personal', 'empleado.cambiar_rol': 'Cambió un rol', 'despido.directo': 'Despidió a una persona',
   'catalogoMP.aprobar.gerente': 'Aprobó una unidad o categoría',

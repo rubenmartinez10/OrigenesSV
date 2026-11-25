@@ -51,7 +51,7 @@ export default function Perfil() {
   const listo = (msg, temporal) => (nuevo) => {
     actualizarUsuario(nuevo);
     toast(msg);
-    if (temporal && !nuevo.cambiarPass && !nuevo.cambiarPin) navigate(`/${nuevo.rol}/${nuevo.entra}`);
+    if (temporal && !nuevo.cambiarPass && !nuevo.cambiarPin && !nuevo.reubicar) navigate(`/${nuevo.rol}/${nuevo.entra}`);
   };
 
   const guardar = () => accion(async () => {
@@ -73,6 +73,11 @@ export default function Perfil() {
 
   return (
     <div className="tw:grid tw:gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))' }}>
+      {u.reubicar && (
+        <div className="tw:col-span-full tw:rounded-2xl tw:bg-[#FFF8E6] tw:border tw:border-[#F0D08A] tw:text-[#7A5200] tw:px-4 tw:py-3">
+          <b>Tu sucursal cerró{u.sucursalNombre ? ` (${u.sucursalNombre})` : ''}.</b> Recursos Humanos te reubicará en otra sucursal o gestionará tu salida. Mientras tanto solo puedes ver tu perfil y tus pagos.
+        </div>
+      )}
       {(u.cambiarPass || u.cambiarPin) && (
         <div className="tw:col-span-full tw:rounded-2xl tw:bg-[#FFF8E6] tw:border tw:border-[#F0D08A] tw:text-[#7A5200] tw:px-4 tw:py-3">
           {u.cambiarPass ? 'Tienes una contraseña temporal: cámbiala para poder usar el sistema.' : 'Debes fijar un PIN nuevo para poder usar el sistema.'}
@@ -121,8 +126,71 @@ export default function Perfil() {
           nota="Los directores entran con contraseña y PIN." />
       )}
 
+      {u.rol !== 'director' && <Renuncia u={u} />}
+
       {!u.cambiarPass && !u.cambiarPin && <MisPagos u={u} />}
     </div>
+  );
+}
+
+/* ---------- Renuncia: hoy es su último día; al terminar su jornada ya no vuelve a entrar ---------- */
+const QUE_HACER = {
+  mesero: 'Antes de terminar tu jornada cierra tu caja y deja cobrados o cancelados tus pedidos.',
+  cocinero: 'Antes de terminar tu jornada termina los pedidos que tienes en preparación.',
+  jefe: 'Antes de terminar tu jornada deja resueltos los pedidos y las reposiciones de la cocina.',
+  bodega: 'Antes de terminar tu jornada deja registradas tus recepciones y conteos pendientes.',
+  gerente: 'Antes de terminar tu jornada resuelve tus aprobaciones pendientes y avisa a tu equipo.',
+  rrhh: 'Antes de terminar tu jornada deja resueltas tus solicitudes pendientes.',
+  gg: 'Antes de terminar tu jornada deja resueltas tus aprobaciones pendientes.',
+};
+export function useTerminarJornada() {
+  const { confirmar, accion } = useDialogos();
+  const { salir } = useSesion();
+  return async () => {
+    if (!(await confirmar({ titulo: 'Terminar mi jornada', texto: 'Es tu último día: al terminar ya no podrás volver a entrar. Tu historial se conserva.', verbo: 'Terminar', rojo: true }))) return;
+    if (await accion(() => api.post('/perfil/renuncia/terminar'), 'Jornada terminada. ¡Gracias por tu trabajo!')) salir();
+  };
+}
+function Renuncia({ u }) {
+  const { motivo, confirmar, accion } = useDialogos();
+  const { actualizarUsuario } = useSesion();
+  const terminar = useTerminarJornada();
+  const r = u.renuncia;
+  const presentar = async () => {
+    const ok = await confirmar({
+      titulo: 'Antes de renunciar',
+      texto: `Si presentas tu renuncia, hoy será tu último día. Seguirás trabajando hasta que termines tu jornada y después ya no podrás entrar. ${QUE_HACER[u.rol] || ''} Si eres la única persona de tu rol, igual puedes renunciar: Recursos Humanos recibe la vacante desde ya para contratar a alguien. Durante el día puedes pedir retirarla, pero Recursos Humanos decide si lo acepta.`,
+      verbo: 'Continuar', rojo: true,
+    });
+    if (!ok) return;
+    const m = await motivo({ titulo: 'Motivo de tu renuncia', nota: 'Tu jefe y Recursos Humanos lo verán.' });
+    if (m) await accion(async () => { actualizarUsuario((await api.post('/perfil/renuncia', { motivo: m })).usuario); }, 'Renuncia presentada. Hoy es tu último día');
+  };
+  const retirar = async () => {
+    const m = await motivo({ titulo: 'Pedir retirar mi renuncia', nota: 'Recursos Humanos decidirá si lo acepta. Sigue siendo tu último día hasta que lo decidan.' });
+    if (m) await accion(async () => { actualizarUsuario((await api.post('/perfil/renuncia/retiro', { motivo: m })).usuario); }, 'Petición enviada a Recursos Humanos');
+  };
+  const jefe = u.rol === 'rrhh' ? 'el gerente general' : 'Recursos Humanos';
+  return (
+    <Card className="tw:flex tw:flex-col tw:gap-3">
+      <h3 className="tw:text-[15px] tw:m-0">Renuncia</h3>
+      {!r ? (
+        <>
+          <Mut>Si decides irte, preséntala aquí: ese día será tu último día de trabajo. Tu historial se conserva.</Mut>
+          <div><Btn v="red" onClick={presentar}>Presentar renuncia</Btn></div>
+        </>
+      ) : (
+        <>
+          <Mut><b>Hoy es tu último día.</b> Cuando termines tu jornada ya no podrás volver a entrar. {QUE_HACER[u.rol] || ''}</Mut>
+          {r.retiro?.estado === 'Solicitado' && <Mut>Pediste retirar tu renuncia. Esperando la decisión de {jefe}; mientras tanto sigues activo.</Mut>}
+          {r.retiro?.estado === 'Rechazado' && <Err>{jefe === 'Recursos Humanos' ? 'Recursos Humanos' : 'El gerente general'} no aceptó retirar tu renuncia{r.retiro.motivoRechazo ? `: ${r.retiro.motivoRechazo}` : ''}. Hoy sigue siendo tu último día.</Err>}
+          <div className="tw:flex tw:flex-wrap tw:gap-2">
+            {r.retiro?.estado !== 'Solicitado' && <Btn v="red" onClick={terminar}>Terminar mi jornada</Btn>}
+            {!r.retiro && <Btn v="t" onClick={retirar}>Pedir retirar mi renuncia</Btn>}
+          </div>
+        </>
+      )}
+    </Card>
   );
 }
 

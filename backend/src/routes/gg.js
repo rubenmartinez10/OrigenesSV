@@ -4,14 +4,14 @@ import { fallo, si, noEncontrado, prohibido, motivo as validarMotivo } from '../
 import { ahora } from '../lib/reloj.js';
 import { bitacora, notificar } from '../lib/registro.js';
 import { verificarClave } from '../lib/clave.js';
-import { cfg, r2, sum, costoPropuesta, neto } from '../lib/negocio.js';
+import { cfg, r2, sum, costoPropuesta, neto, bajoMargen, msgMargen, valoraciones, valDe, pedidosPendientesCon, msgPendientes } from '../lib/negocio.js';
 import { cargarSolicitudes } from '../lib/consultas.js';
 import { creditoFactura, ajusteFactura } from '../lib/procesos.js';
 import { cargarCompras, compraParaCambiar, aceptarGG, perdidaCompra } from '../lib/compras.js';
-import { ROLN, ROLES_SUC, activos, necesarios, abrirVacantes, aplicarDespido } from '../lib/personal.js';
+import { ROLN, ROLES_SUC, activos, necesarios, abrirVacantes, aplicarDespido, decidirRetiro } from '../lib/personal.js';
 import { crearMateria, sustituirNueva, unidadDeNueva, altaPrecio, cambio } from '../lib/proveedores.js';
 import { TAM, intervaloSuc, costoSuc, abiertosSuc, crearSucursal } from '../lib/sucursales.js';
-import { rangos, ventasRango, gastos, porDia, totalDe } from '../lib/panel.js';
+import { rangos, ventasRango, gastos, porDia, totalDe, tendencia } from '../lib/panel.js';
 import { ranking, costoMax } from './gerente.js';
 import { cargarReportes, filasReporte } from './rrhh.js';
 
@@ -22,7 +22,7 @@ const TP = ['Producto nuevo', 'Extra nuevo', 'Categoría nueva'];
 const COMPRAS_PEND = ['Aceptada por gerente', 'Devolución en revisión', 'Cancelación en revisión', 'Descuento en revisión'];
 const REVISION = ['Devolución en revisión', 'Cancelación en revisión', 'Descuento en revisión'];
 const norm = (t) => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
-const sucursales = async (c) => (await c.query('SELECT id, nombre, zona, tamano, estado, costo, mesas FROM sucursales ORDER BY id')).rows;
+const sucursales = async (c) => (await c.query('SELECT id, nombre, zona, direccion, tamano, estado, costo, mesas, foto_url AS foto FROM sucursales ORDER BY id')).rows;
 const rechazo = (u, m, etapa = 'Gerente general') => JSON.stringify({ por: u.nombre, etapa, motivo: m, fecha: ahora() });
 
 /* ---------- pendientes por tipo (y por sucursal) ---------- */
@@ -33,11 +33,11 @@ export async function pendientesGG(c, s = null) {
     Compras: await n(`SELECT count(*)::int n FROM compras WHERE ($1::int IS NULL OR sucursal_id = $1) AND estado = ANY($2)`, [COMPRAS_PEND]),
     Proveedores: await sol('Materia sin proveedor'),
     Precios: await sol('Cambio de precio'),
-    Menús: await sol('Agregar al menú'),
+    Menús: await sol('Agregar al menú') + await sol('Quitar del menú'),
     Productos: await n(`SELECT count(*)::int n FROM solicitudes WHERE ($1::int IS NULL OR sucursal_id = $1) AND tipo = ANY($2) AND estado = 'Aprobado por gerente de sucursal'`, [TP]),
     Nómina: (s ? 0 : await n(`SELECT count(*)::int n FROM solicitudes WHERE $1::int IS NULL AND tipo = 'Salario' AND estado = 'Solicitada'`))
       + await n(`SELECT count(*)::int n FROM reportes_pago WHERE ($1::int IS NULL OR sucursal_id = $1) AND estado = 'Enviado'`),
-    Despidos: await sol('Despido', `AND aprueba_rol = 'gg'`),
+    Despidos: await sol('Despido', `AND aprueba_rol = 'gg'`) + await sol('Renuncia', `AND aprueba_rol = 'gg' AND datos->'retiro'->>'estado' = 'Solicitado'`),
     Personal: await sol('Personal'),
   };
 }
@@ -67,6 +67,10 @@ r.get('/panel', async (req, res) => {
     porCategoria: await ranking(DB, s, a, b, 'cat'), topProductos: (await ranking(DB, s, a, b, 'prod')).slice(0, 5),
     filas, sucursales: (await sucursales(DB)).map((x) => ({ id: x.id, nombre: x.nombre })),
   });
+});
+
+r.get('/tendencia', async (req, res) => {
+  res.json(await tendencia(DB, +req.query.suc || null, String(req.query.per || 'Hoy')));
 });
 
 /* ---------- 7.2 Compras ---------- */
@@ -255,7 +259,8 @@ r.post('/precios/:id/aprobar', async (req, res) => {
     const x = rows[0];
     si(!x, 'Esta solicitud ya fue decidida');
     const k = await cfg(c);
-    si(neto(x.datos.precio, k) < (await costoMax(c, x.producto_id)), 'El precio es menor que el costo más alto');
+    const cmax = await costoMax(c, x.producto_id);
+    si(bajoMargen(x.datos.precio, cmax, k), msgMargen(cmax, k));
     await cambiarPrecio(c, x.producto_id, x.datos.precio, u, x.id);
     await c.query(`UPDATE solicitudes SET estado = 'Aplicada', decidio_id = $2, cierre = $3 WHERE id = $1`, [x.id, u.id, ts(ahora())]);
     await notificar(c, 'gerente', x.sucursal_id, 'Precio aprobado', `${x.nombre} · $${(+x.datos.precio).toFixed(2)}`);
@@ -283,7 +288,7 @@ r.post('/precios/:id/rechazar', async (req, res) => { await rechazarSolicitud(re
 
 /* ---------- agregar productos al menú de una sucursal ---------- */
 r.get('/menus', async (req, res) => {
-  const L = await cargarSolicitudes(DB, `s.tipo = 'Agregar al menú' AND s.estado = 'Solicitada'`, [], 's.fecha');
+  const L = await cargarSolicitudes(DB, `s.tipo IN ('Agregar al menú','Quitar del menú') AND s.estado = 'Solicitada'`, [], 's.fecha');
   const { rows: p } = await q(`SELECT p.id, p.precio, ARRAY(SELECT cg.nombre FROM producto_categorias pc JOIN categorias cg ON cg.id = pc.categoria_id WHERE pc.producto_id = p.id) AS cats FROM productos p`);
   const P = Object.fromEntries(p.map((x) => [x.id, x]));
   const { rows: sc } = await q('SELECT id, nombre FROM sucursales');
@@ -293,18 +298,33 @@ r.get('/menus', async (req, res) => {
 r.post('/menus/:id/aprobar', async (req, res) => {
   const u = req.usuario;
   await tx(async (c) => {
-    const { rows } = await c.query(`SELECT * FROM solicitudes WHERE id = $1 AND tipo = 'Agregar al menú' AND estado = 'Solicitada' FOR UPDATE`, [req.params.id]);
+    const { rows } = await c.query(`SELECT * FROM solicitudes WHERE id = $1 AND tipo IN ('Agregar al menú','Quitar del menú') AND estado = 'Solicitada' FOR UPDATE`, [req.params.id]);
     const x = rows[0];
     si(!x, 'Esta solicitud ya fue decidida');
-    await c.query('INSERT INTO sucursal_menu (sucursal_id, producto_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [x.sucursal_id, x.producto_id]);
-    await c.query(`INSERT INTO menu_historial (sucursal_id, producto_id, estado, fecha, razon, por) VALUES ($1,$2,'Activo',$3,'',$4)`, [x.sucursal_id, x.producto_id, ts(ahora()), u.nombre]);
+    if (x.tipo === 'Quitar del menú') {
+      const n = await pedidosPendientesCon(c, x.producto_id, x.sucursal_id);
+      si(n, msgPendientes(n));
+      await c.query('DELETE FROM sucursal_menu WHERE sucursal_id = $1 AND producto_id = $2', [x.sucursal_id, x.producto_id]);
+      await c.query(`INSERT INTO menu_historial (sucursal_id, producto_id, estado, fecha, razon, por) VALUES ($1,$2,'Inhabilitado',$3,$4,$5)`,
+        [x.sucursal_id, x.producto_id, ts(ahora()), x.motivo || '', u.nombre]);
+    } else {
+      await c.query('INSERT INTO sucursal_menu (sucursal_id, producto_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [x.sucursal_id, x.producto_id]);
+      await c.query(`INSERT INTO menu_historial (sucursal_id, producto_id, estado, fecha, razon, por) VALUES ($1,$2,'Activo',$3,'',$4)`, [x.sucursal_id, x.producto_id, ts(ahora()), u.nombre]);
+    }
+    const quitar = x.tipo === 'Quitar del menú';
     await c.query(`UPDATE solicitudes SET estado = 'Aplicada', decidio_id = $2, cierre = $3 WHERE id = $1`, [x.id, u.id, ts(ahora())]);
-    await notificar(c, 'gerente', x.sucursal_id, 'Producto agregado a tu menú', x.nombre);
-    await bitacora(c, u, { accion: 'menu.aprobar', elemento: x.nombre, sucursal: x.sucursal_id });
+    await notificar(c, 'gerente', x.sucursal_id, quitar ? 'Producto quitado de tu menú' : 'Producto agregado a tu menú', x.nombre);
+    await bitacora(c, u, { accion: quitar ? 'menu.aprobar_quitar' : 'menu.aprobar', elemento: x.nombre, sucursal: x.sucursal_id });
   });
   res.json({ ok: true });
 });
-r.post('/menus/:id/rechazar', async (req, res) => { await rechazarSolicitud(req, 'Agregar al menú', ['gerente', 'No se agregó al menú']); res.json({ ok: true }); });
+r.post('/menus/:id/rechazar', async (req, res) => {
+  const { rows } = await q(`SELECT tipo FROM solicitudes WHERE id = $1 AND tipo IN ('Agregar al menú','Quitar del menú')`, [req.params.id]);
+  si(!rows[0], 'Esta solicitud ya fue decidida');
+  const quitar = rows[0].tipo === 'Quitar del menú';
+  await rechazarSolicitud(req, rows[0].tipo, ['gerente', quitar ? 'El producto sigue en tu menú' : 'No se agregó al menú']);
+  res.json({ ok: true });
+});
 
 /* ---------- 7.6 Productos nuevos ---------- */
 async function conProveedor(c) {
@@ -351,7 +371,7 @@ r.post('/propuestas/:id/aprobar', async (req, res) => {
     if (x.tipo === 'Producto nuevo') {
       const k = await cfg(c);
       const cst = await costoPropuesta(c, d.ings, x.sucursal_id);
-      si(!(x.monto > 0) || neto(x.monto, k) <= cst.costo, 'El precio no cubre el costo: rechaza la propuesta para que el gerente lo corrija');
+      si(!(x.monto > 0) || bajoMargen(x.monto, cst.costo, k), `${msgMargen(cst.costo, k)}. Rechaza la propuesta para que el gerente la corrija`);
     }
     await c.query(`UPDATE solicitudes SET estado = 'Aprobado por gerente general', aprueba_rol = 'director', fecha = $2, datos = datos || $3::jsonb WHERE id = $1`,
       [x.id, ts(ahora()), JSON.stringify({ gg: u.id })]);
@@ -542,13 +562,14 @@ r.post('/reportes/:id/rechazar', async (req, res) => { await decidirReporte(req,
 /* ---------- 7.8 Sucursales ---------- */
 r.get('/sucursales', async (req, res) => {
   const sucs = await sucursales(DB);
+  const V = await valoraciones(DB);
   const { rows: vac } = await q(`SELECT sucursal_id, sum(cantidad)::int t, sum(cubiertas)::int c FROM vacantes WHERE origen = 'Apertura de sucursal' AND estado <> 'Cancelada' GROUP BY sucursal_id`);
   const { rows: pr } = await q(
     `SELECT p.*, s.nombre AS suc_nombre, u.nombre AS pide_nombre FROM propuestas_sucursal p LEFT JOIN sucursales s ON s.id = p.sucursal_id
        JOIN usuarios u ON u.id = p.pide_id ORDER BY p.fecha DESC`);
   const { rows: zonas } = await q('SELECT nombre FROM zonas ORDER BY nombre');
   res.json({
-    sucursales: sucs.map((s) => ({ ...s, tamanoNombre: TAM[s.tamano], vacantes: vac.find((v) => v.sucursal_id === s.id) || null })),
+    sucursales: sucs.map((s) => ({ ...s, ...valDe(V, s.id), tamanoNombre: TAM[s.tamano], vacantes: vac.find((v) => v.sucursal_id === s.id) || null })),
     propuestas: pr.map((p) => ({
       id: p.id, tipo: p.tipo, zona: p.zona, tamano: p.tamano, tamanoNombre: TAM[p.tamano], costo: p.costo, suc: p.sucursal_id, sucNombre: p.suc_nombre,
       motivo: p.motivo, pideNombre: p.pide_nombre, estado: p.estado, fecha: p.fecha, rechazo: p.rechazo_motivo,
@@ -595,7 +616,7 @@ r.post('/sucursales/propuestas/:id/abrir', async (req, res) => {
     const { rows } = await c.query(`SELECT * FROM propuestas_sucursal WHERE id = $1 AND estado = 'Compra aprobada' FOR UPDATE`, [req.params.id]);
     const p = rows[0];
     si(!p, 'Esta sucursal ya fue abierta');
-    const s = await crearSucursal(c, { zona: p.zona, tamano: p.tamano, costo: p.costo, propId: p.id });
+    const s = await crearSucursal(c, { zona: p.zona, tamano: p.tamano, costo: p.costo, propId: p.id, nombre: req.body?.nombre, direccion: req.body?.direccion });
     await bitacora(c, u, { accion: 'sucursal.abrir', elemento: s.nombre, despues: { zona: p.zona, tamano: p.tamano }, sucursal: s.sid });
     return s;
   });
@@ -604,7 +625,7 @@ r.post('/sucursales/propuestas/:id/abrir', async (req, res) => {
 
 /* ---------- 7.9 Despidos ---------- */
 r.get('/despidos', async (req, res) => {
-  const L = await cargarSolicitudes(DB, `s.tipo = 'Despido' AND ((s.aprueba_rol = 'gg' AND s.estado = 'Solicitada') OR (s.aprueba_rol = 'gerente' AND s.estado = 'Aplicada'))`);
+  const L = await cargarSolicitudes(DB, `s.tipo IN ('Despido','Renuncia') AND ((s.aprueba_rol = 'gg' AND s.estado = 'Solicitada' AND (s.tipo = 'Despido' OR s.datos->'retiro'->>'estado' = 'Solicitado')) OR (s.aprueba_rol = 'gerente' AND s.estado = 'Aplicada' AND s.tipo = 'Despido'))`);
   const { rows } = await q('SELECT u.id, u.nombre, u.rol_id, s.nombre AS suc FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id');
   const U = Object.fromEntries(rows.map((x) => [x.id, x]));
   const { rows: dec } = await q('SELECT id, decidio_id FROM solicitudes WHERE id = ANY($1)', [L.map((x) => x.id)]);
@@ -615,15 +636,24 @@ r.get('/despidos', async (req, res) => {
 r.post('/despidos/:id/aprobar', async (req, res) => {
   const u = req.usuario;
   const ind = await tx(async (c) => {
-    const { rows } = await c.query(`SELECT * FROM solicitudes WHERE id = $1 AND tipo = 'Despido' AND aprueba_rol = 'gg' AND estado = 'Solicitada'`, [req.params.id]);
+    const { rows } = await c.query(`SELECT * FROM solicitudes WHERE id = $1 AND tipo = 'Despido' AND estado = 'Solicitada'`, [req.params.id]);
     si(!rows[0], 'Este despido ya fue decidido');
+    si(rows[0].aprueba_rol === 'rrhh', 'Primero debe aceptarlo Recursos Humanos');
+    si(rows[0].aprueba_rol !== 'gg', 'Este despido no te corresponde');
     const i = await aplicarDespido(c, rows[0].id, u);
     await bitacora(c, u, { accion: 'despido.aprobar', elemento: rows[0].nombre, motivo: rows[0].motivo, despues: { indemnizacion: i.monto }, sucursal: rows[0].sucursal_id });
     return i;
   });
   res.json({ ok: true, indemnizacion: ind });
 });
-r.post('/despidos/:id/rechazar', async (req, res) => { await rechazarSolicitud(req, 'Despido', ['rrhh', 'Despido rechazado']); res.json({ ok: true }); });
+r.post('/despidos/:id/retiro', async (req, res) => {
+  const aceptar = !!req.body?.aceptar;
+  const m = aceptar ? null : validarMotivo(req.body?.motivo, 'El motivo');
+  await tx(async (c) => decidirRetiro(c, req.params.id, aceptar, req.usuario, m));
+  res.json({ ok: true });
+});
+r.post('/despidos/:id/rechazar', async (req, res) => {
+  await rechazarSolicitud(req, 'Despido', ['rrhh', 'Despido rechazado']); res.json({ ok: true }); });
 
 /* ---------- 7.10 Plantilla ---------- */
 r.get('/plantilla', async (req, res) => {

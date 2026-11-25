@@ -135,10 +135,11 @@ export default function Cobro() {
           <button key={x.id} type="button" onClick={() => setSel(x.id)}
             className={`tw:flex tw:flex-col tw:gap-1 tw:text-left tw:w-full tw:p-3.5 tw:rounded-[20px] tw:border ${p && x.id === p.id ? 'tw:border-br tw:bg-brs' : 'tw:border-bd tw:bg-bg'}`}>
             <span className="tw:flex tw:justify-between"><b>{donde(x)} · #{x.num}</b><b>{$(x.total)}</b></span>
-            <small className="tw:text-tx2">{fmt(x.entregado || x.creado)}</small>
+            {x.estado === 'Cancelado' && <small className="tw:text-er tw:font-semibold">Cancelado en cocina: solo se cobran los insumos usados</small>}
+            <small className="tw:text-tx2">{fmt(x.entregado || x.canc || x.creado)}</small>
             <small className="tw:text-tx2">{resumen(x)}</small>
           </button>
-        )) : <Vacio>No hay pedidos por cobrar</Vacio>}
+        )) : <Vacio>No hay pedidos por cobrar. Los de mesa aparecen cuando marcas «El cliente se retira» en Mesas.</Vacio>}
       </div>
     </Sec>
   );
@@ -151,6 +152,7 @@ export default function Cobro() {
         <Modal.Body>
           <h3>Documento emitido</h3>
           <Documento v={emitido} iva={iva} />
+          <Valorar v={emitido} onListo={(n) => setEmitido({ ...emitido, estrellas: n })} />
           <div className="tw:flex tw:justify-end tw:gap-2">
             <Btn v="t" onClick={() => imprimirTicket(emitido.ped, emitido, usuario.sucursalNombre, iva)}>Imprimir ticket</Btn>
             <Btn v="p" onClick={() => setEmitido(null)}>Cerrar</Btn>
@@ -179,9 +181,11 @@ export default function Cobro() {
     <>
       {marco(
         <div className="tw:flex tw:flex-col tw:gap-3.5">
-          <Sec t={`Pedido #${p.num} · ${donde(p)}`}>
+          <Sec t={`Pedido #${p.num} · ${donde(p)}${p.estado === 'Cancelado' ? ' · cancelado' : ''}`}>
+            {p.estado === 'Cancelado' && <small className="tw:text-tx2">Se canceló cuando ya estaba en cocina. El cliente paga el costo de los insumos usados (con IVA); el resto del pedido no se cobra.</small>}
             <div className="tw:flex tw:flex-col">{p.lineas.map((l) => <Ln key={l.orden} a={<span className="tw:text-tx">{txt(l)}</span>} b={<b>{$(l.unit * l.cant)}</b>} />)}</div>
             <div className="tw:flex tw:flex-col tw:border-t tw:border-bd tw:pt-1.5">
+              {p.envio > 0 && <Ln a="Envío (incluido en el total)" b={$(p.envio)} />}
               <Ln a="Subtotal sin IVA" b={$(sub)} />
               <Ln a={`IVA ${iva} %`} b={$(p.total - sub)} />
               {propina > 0 && <Ln a={`Propina ${pct} %`} b={$(propina)} />}
@@ -210,5 +214,24 @@ export default function Cobro() {
         onCobrado={(v) => { setPago(false); setPct(0); setSel(null); setEmitido(v); recargar(); }} />}
       {modalEmitido}
     </>
+  );
+}
+
+/** Valoración opcional del cliente al pagar: de 1 a 5 estrellas; sirve para el ranking de sucursales. */
+function Valorar({ v, onListo }) {
+  const { accion } = useDialogos();
+  const [hover, setHover] = useState(0);
+  if (v.estrellas) return <div className="tw:text-center tw:text-[#E0A42E] tw:text-xl" aria-label={`Valoración ${v.estrellas} de 5`}>{'★'.repeat(v.estrellas)}{'☆'.repeat(5 - v.estrellas)} <small className="tw:text-tx2 tw:text-xs">Gracias por valorarnos</small></div>;
+  const dar = async (n) => { if (await accion(() => api.post(`/mesero/ventas/${v.id}/valorar`, { estrellas: n }))) onListo(n); };
+  return (
+    <div className="tw:flex tw:flex-col tw:items-center tw:gap-1">
+      <small className="tw:text-tx2">¿Cómo estuvo todo? (opcional · pídele al cliente su valoración)</small>
+      <div className="tw:flex tw:gap-1" onMouseLeave={() => setHover(0)}>
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button key={n} type="button" aria-label={`${n} estrella${n > 1 ? 's' : ''}`} onMouseEnter={() => setHover(n)} onClick={() => dar(n)}
+            className={`tw:bg-transparent tw:border-0 tw:text-3xl tw:cursor-pointer ${n <= hover ? 'tw:text-[#E0A42E]' : 'tw:text-[#C9D3E3]'}`}>★</button>
+        ))}
+      </div>
+    </div>
   );
 }

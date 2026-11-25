@@ -20,9 +20,9 @@ export const bitacoraSistema = (c, accion, elemento, motivo, sucursal) =>
   bitacora(c, null, { accion, elemento, motivo, sucursal });
 
 /** Aviso para un rol (y su sucursal). Los roles de franquicia usan sucursal = null. */
-export async function notificar(c, rol, sucursal, titulo, detalle) {
+export async function notificar(c, rol, sucursal, titulo, detalle, rojo = false) {
   await c.query(
-    'INSERT INTO notificaciones (rol_id, sucursal_id, titulo, detalle, fecha) VALUES ($1,$2,$3,$4,$5)',
-    [rol, sucursal ?? null, titulo, detalle ?? '', ts(ahora())],
+    'INSERT INTO notificaciones (rol_id, sucursal_id, titulo, detalle, fecha, rojo) VALUES ($1,$2,$3,$4,$5,$6)',
+    [rol, sucursal ?? null, titulo, detalle ?? '', ts(ahora()), rojo],
   );
 }

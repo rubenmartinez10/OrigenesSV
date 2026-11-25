@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { $ } from '../../lib/formato.js';
 import { useDatos } from '../../context/Sesion.jsx';
+import Tendencia from '../../components/Tendencia.jsx';
 import { Barra, Btn, Card, Cargando, Chip, Fila, Kpi, Mut, Panel, Pildoras, Tabla, Vacio } from '../../components/ui.jsx';
 
 /* Gerente de sucursal · 5.1 Resumen */
@@ -53,6 +54,7 @@ export default function Resumen() {
           ))}
         </Card>
       </div>
+      <Tendencia endpoint="/gerente/tendencia" />
       <Panel show={panel === 'stock'} onHide={() => setPanel(null)} titulo="Stock bajo" ro>
         {datos.stockBajo.length ? <Tabla cols={['Materia prima', 'Stock', 'Mínimo']} filas={datos.stockBajo.map((x) => [x.nombre, `${x.stock.toFixed(1)} ${x.unidad}`, x.minimo.toFixed(1)])} /> : <Vacio ic="check">Todo en orden</Vacio>}
       </Panel>

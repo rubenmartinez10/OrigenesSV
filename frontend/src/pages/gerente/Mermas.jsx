@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Form } from 'react-bootstrap';
 import { api } from '../../lib/api.js';
-import { D, fFecha, fmt, inicioDia } from '../../lib/formato.js';
+import { $, D, fFecha, fmt, inicioDia } from '../../lib/formato.js';
 import { useDatos } from '../../context/Sesion.jsx';
 import { useDialogos } from '../../context/Dialogos.jsx';
 import { Ban, Btn, Campo, Cargando, Mut, Panel, Pildoras, Stack, Tabla, Vacio } from '../../components/ui.jsx';
@@ -69,7 +69,7 @@ export default function Mermas() {
       </div>
       <Ban>La merma es la única forma manual de bajar stock.</Ban>
       {L.length ? <Tabla cols={['Fecha', 'Materia prima', 'Lote', 'Cantidad', 'Tipo', 'Motivo', 'Registró']}
-        filas={L.map((m) => [fmt(m.fecha), m.mp, m.lote || '—', `${m.cant} ${m.unidad}`, m.tipo, m.motivo, m.por || 'Sistema'])} /> : <Vacio>No hay mermas registradas</Vacio>}
+        filas={L.map((m) => [fmt(m.fecha), m.mp || (m.pedido ? `Pedido #${m.pedido}` : '—'), m.lote || '—', m.mp ? `${m.cant} ${m.unidad}` : $(m.costo), m.tipo, m.motivo, m.por || 'Sistema'])} /> : <Vacio>No hay mermas registradas</Vacio>}
       {nueva && <NuevaMerma lotes={datos.lotes} onHide={() => setNueva(false)} />}
     </Stack>
   );

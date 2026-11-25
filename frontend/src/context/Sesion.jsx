@@ -63,7 +63,7 @@ export function SesionProvider({ children }) {
         const total = Object.values(p.menu).concat(Object.values(p.tabs)).reduce((a, n) => a + n, 0);
         const antes = ultimo.current;
         if (antes) {
-          if (p.ultima && p.ultima.id > (antes.id || 0)) sonar(URGENTE.test(`${p.ultima.titulo} ${p.ultima.detalle}`) ? 'urgente' : 'alerta');
+          if (p.ultima && p.ultima.id > (antes.id || 0)) sonar(p.ultima.rojo || URGENTE.test(`${p.ultima.titulo} ${p.ultima.detalle}`) ? 'urgente' : 'alerta');
           else if (total > antes.total) sonar('alerta');
           if ((p.ultima?.id || 0) !== (antes.id || 0) || total !== antes.total) setVersion((v) => v + 1);
         }

@@ -3,7 +3,8 @@
 /** Pedidos con sus líneas, extras y lo reservado. `where` usa el alias p. */
 export async function cargarPedidos(c, where, params = [], orden = 'p.creado') {
   const { rows } = await c.query(
-    `SELECT p.*, me.nombre AS mesero_nombre, co.nombre AS cocinero_nombre, rp.num AS rep_num
+    `SELECT p.*, me.nombre AS mesero_nombre, co.nombre AS cocinero_nombre, rp.num AS rep_num,
+            EXISTS (SELECT 1 FROM ventas v WHERE v.pedido_id = p.id) AS pagado
        FROM pedidos p
        JOIN usuarios me ON me.id = p.mesero_id
        LEFT JOIN usuarios co ON co.id = p.cocinero_id
@@ -30,13 +31,20 @@ export async function cargarPedidos(c, where, params = [], orden = 'p.creado') {
 export const pedidoJson = (p, lineas, res) => ({
   id: p.id, num: p.num, suc: p.sucursal_id, mesero: p.mesero_id, meseroNombre: p.mesero_nombre,
   cocinero: p.cocinero_id, cocineroNombre: p.cocinero_nombre, tipo: p.tipo, mesa: p.mesa, ref: p.cliente,
+  direccion: p.direccion, telefono: p.telefono, envio: p.envio,
   estado: p.estado, total: p.total, estSeg: p.est_seg, rep: p.reposicion_de, repNum: p.rep_num, consumido: p.consumido,
   creado: p.creado, aceptado: p.aceptado, asignado: p.asignado, ini: p.iniciado, fin: p.terminado, entregado: p.entregado,
-  canc: p.cancelado, motivo: p.motivo_cancel, porDemora: p.por_demora,
+  canc: p.cancelado, motivo: p.motivo_cancel, porDemora: p.por_demora, cargo: Number(p.cargo_cancel || 0), pagado: !!p.pagado,
   rechazo: p.rechazo_motivo ? { motivo: p.rechazo_motivo, fecha: p.rechazo_fecha, por: p.rechazo_por } : null,
-  vistoMes: p.visto_mesero, vistoCoc: p.visto_cocinero, salidaPedida: p.salida_pedida, mesaLibre: p.mesa_liberada,
+  vistoMes: p.visto_mesero, vistoCoc: p.visto_cocinero, salidaPedida: p.salida_pedida, cuentaPedida: p.cuenta_pedida, mesaLibre: p.mesa_liberada,
   lineas, res,
 });
+
+/** Pedido cancelado ya en cocina: se cobra solo el costo de los insumos usados (una línea, sin envío). */
+export const LINEA_CARGO = 'Insumos ya usados (pedido cancelado)';
+export const comoCargo = (p) => (p.estado === 'Cancelado' && p.cargo > 0
+  ? { ...p, total: p.cargo, envio: 0, lineas: [{ orden: 0, pr: null, nombre: LINEA_CARGO, cant: 1, unit: p.cargo, extras: [] }] }
+  : p);
 
 export async function cargarPedido(c, id) {
   return (await cargarPedidos(c, 'p.id = $1', [id]))[0] || null;
@@ -80,8 +88,9 @@ export async function cargarVentas(c, where, params = []) {
     id: v.id, suc: v.sucursal_id, sucNombre: v.sucursal_nombre, pedido: v.pedido_id, num: v.num, mesero: v.mesero_id,
     meseroNombre: v.mesero_nombre, cocineroNombre: v.cocinero_nombre, caja: v.caja_id, fecha: v.fecha, metodo: v.metodo,
     ref: v.referencia, pago: v.pago, propina: v.propina, tipo: v.tipo_doc, corr: v.correlativo,
+    codigo: v.codigo_generacion, sello: v.sello, estrellas: v.estrellas,
     fis: v.fis_nombre ? { nombre: v.fis_nombre, nit: v.fis_nit, nrc: v.fis_nrc } : null,
     total: v.total, sub: v.subtotal, iva: v.iva, devuelto: v.devuelto,
-    lineas: porId[v.pedido_id]?.lineas || [], ped: porId[v.pedido_id] || null,
+    lineas: porId[v.pedido_id] ? comoCargo(porId[v.pedido_id]).lineas : [], ped: porId[v.pedido_id] || null,
   }));
 }

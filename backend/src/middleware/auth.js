@@ -16,8 +16,11 @@ export const cerrarSesion = (res) => res.clearCookie(COOKIE, opciones);
 export async function cargarUsuario(id) {
   const { rows } = await q(
     `SELECT u.id, u.usuario, u.nombre, u.rol_id AS rol, u.sucursal_id AS sucursal, u.estado, u.documento,
-            u.telefono, u.correo, u.foto_url AS foto, u.ingreso, u.cambiar_pass, u.cambiar_pin, u.recup_pass, u.recup_pin,
+            u.telefono, u.correo, u.foto_url AS foto, u.ingreso, u.cambiar_pass, u.cambiar_pin, u.recup_pass, u.recup_pin, u.reubicacion_desde,
             u.clave_hash IS NOT NULL AS tiene_clave, u.intentos_clave,
+            (SELECT jsonb_build_object('id', x.id, 'fecha', x.fecha, 'motivo', x.motivo, 'retiro', x.datos->'retiro')
+               FROM solicitudes x WHERE x.tipo = 'Renuncia' AND x.usuario_id = u.id AND x.estado = 'Solicitada' AND x.datos->>'salio' IS NULL
+              ORDER BY x.id DESC LIMIT 1) AS renuncia,
             r.nombre AS rol_nombre, r.pantalla_inicio, s.nombre AS sucursal_nombre
        FROM usuarios u JOIN roles r ON r.id = u.rol_id LEFT JOIN sucursales s ON s.id = u.sucursal_id
       WHERE u.id = $1`, [id]);
@@ -28,7 +31,7 @@ export const usuarioPublico = (u) => ({
   id: u.id, usuario: u.usuario, nombre: u.nombre, rol: u.rol, rolNombre: u.rol_nombre, entra: u.pantalla_inicio,
   sucursal: u.sucursal, sucursalNombre: u.sucursal_nombre, telefono: u.telefono || '', correo: u.correo || '',
   foto: u.foto, documento: u.documento, cambiarPass: u.cambiar_pass, cambiarPin: u.cambiar_pin,
-  recupPass: u.recup_pass, recupPin: u.recup_pin, tieneClave: u.tiene_clave, claveBloqueada: u.intentos_clave >= 3,
+  renuncia: u.renuncia || null, reubicar: !!u.reubicacion_desde, reubicarDesde: u.reubicacion_desde, recupPass: u.recup_pass, recupPin: u.recup_pin, tieneClave: u.tiene_clave, claveBloqueada: u.intentos_clave >= 3,
 });
 
 /** Exige una sesión válida de alguien que sigue Activo. */
@@ -55,6 +58,7 @@ export async function autenticar(req, res, next) {
 export function exigirCredencialesAlDia(req, res, next) {
   const u = req.usuario;
   if (u.cambiar_pass || u.cambiar_pin) throw new HttpError(423, 'Primero cambia tu contraseña en Mi perfil');
+  if (u.reubicacion_desde) throw new HttpError(423, 'Tu sucursal cerró: Recursos Humanos te reubicará. Mientras tanto solo puedes ver tu perfil');
   next();
 }
 

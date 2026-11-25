@@ -3,12 +3,13 @@ import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { Dropdown, Offcanvas } from 'react-bootstrap';
 import { useSesion, useAhora } from '../context/Sesion.jsx';
 import { useDialogos } from '../context/Dialogos.jsx';
-import { ROLES, pendientesDe } from '../roles.js';
+import { ROLES, pendientesDe, pendientesItem } from '../roles.js';
 import { saludo } from '../lib/formato.js';
 import { sonidoActivo, alternarSonido, sonar } from '../lib/sonido.js';
 import { Icono } from './Icono.jsx';
-import { Avatar } from './ui.jsx';
+import { Avatar, BanRojo, Btn } from './ui.jsx';
 import { RelojChip } from './RelojChip.jsx';
+import { useTerminarJornada } from '../pages/Perfil.jsx';
 
 const SLOGAN = 'Puchica, qué buen sabor';
 const Badge = ({ n, className = '' }) => (n ? (
@@ -41,7 +42,7 @@ function Sidebar({ rol, activo }) {
       </div>
       {R.menu.map((it) => {
         const on = it.id === activo;
-        const n = pend.menu[it.id] || 0;
+        const n = pendientesItem(it, pend);
         return (
           <Link key={it.id} to={`/${rol}/${it.id}`} title={it.label} aria-current={on ? 'page' : undefined}
             className={`tw:relative tw:z-[1] tw:flex tw:flex-col tw:md:flex-row tw:items-center tw:justify-center tw:xl:justify-start tw:gap-0.5 tw:md:gap-3 tw:min-w-16 tw:md:min-w-0 tw:rounded-[22px] tw:md:rounded-[14px] tw:px-2 tw:md:px-3 tw:py-1.5 tw:md:py-2.5 tw:text-[11px] tw:md:text-sm tw:no-underline
@@ -62,6 +63,22 @@ function Sidebar({ rol, activo }) {
         <Icono n="chev" size={18} className="tw:text-tx2" />
       </div>
     </nav>
+  );
+}
+
+/* ---------- franja: su renuncia está en curso y hoy es su último día ---------- */
+function FranjaRenuncia() {
+  const { usuario } = useSesion();
+  const terminar = useTerminarJornada();
+  const r = usuario.renuncia;
+  if (!r) return null;
+  const esperando = r.retiro?.estado === 'Solicitado';
+  return (
+    <div className="no-print tw:flex tw:flex-wrap tw:items-center tw:gap-3 tw:mb-3.5 tw:rounded-2xl tw:bg-[#FFF8E6] tw:border tw:border-[#F0D08A] tw:text-[#7A5200] tw:px-4 tw:py-3">
+      <span className="tw:flex-1 tw:min-w-[220px]"><b>Hoy es tu último día.</b> {esperando ? 'Esperando la decisión sobre retirar tu renuncia.' : 'Cuando termines tu jornada ya no podrás volver a entrar.'}</span>
+      {!esperando && <Btn v="red" onClick={terminar}>Terminar mi jornada</Btn>}
+      <Link to={`/${usuario.rol}/perfil`} className="tw:text-sm tw:font-semibold tw:text-[#7A5200]">Ver mi renuncia</Link>
+    </div>
   );
 }
 
@@ -171,6 +188,12 @@ export function Shell({ rol, item, tab, titulo, accion, children }) {
           <MenuUsuario rol={rol} />
         </header>
         <main className="tw:max-w-[1440px] tw:mx-auto tw:px-3 tw:md:px-7 tw:pt-[18px] tw:pb-28 tw:md:pb-9">
+          <FranjaRenuncia />
+          {(pend.rojas || []).length > 0 && (
+            <div className="tw:flex tw:flex-col tw:gap-2 tw:mb-3.5">
+              {pend.rojas.map((a) => <BanRojo key={a.id}><b>{a.titulo}.</b> {a.detalle}</BanRojo>)}
+            </div>
+          )}
           {esInicio && <Hero />}
           <div className="tw:flex tw:items-center tw:gap-3.5 tw:mb-3.5">
             <h1 className="tw:flex tw:items-center tw:gap-3 tw:text-[19px] tw:md:text-[23px] tw:font-bold tw:m-0">

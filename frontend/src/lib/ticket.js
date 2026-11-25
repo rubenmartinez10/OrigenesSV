@@ -21,11 +21,11 @@ table{width:100%;border-collapse:collapse}td{padding:2px 0;vertical-align:top}.f
 </style></head><body>
 <div class="c"><img src="${location.origin}/assets/logo-azul.png" style="height:46px;margin-bottom:4px"><h1>Orígenes SV</h1><div>Puchica, qué buen sabor</div><div>Sucursal ${esc(sucursal)}</div></div><hr>
 <div class="c"><b>${v ? `${esc(v.tipo)} ${esc(corr(v))}` : 'CUENTA'}</b>${v ? '' : '<br><small>No es un documento fiscal</small>'}</div>
-${f(p.rep ? 'Reposición' : 'Pedido', `#${p.num}`)}${f('Servicio', esc(donde(p)))}${f('Cocinero', esc(p.cocineroNombre || '—'))}${f('Fecha', fmt(v ? v.fecha : p.entregado || p.creado))}${f('Atendió', esc(p.meseroNombre || ''))}
+${f(p.rep ? 'Reposición' : 'Pedido', `#${p.num}`)}${p.tipo === 'Delivery' && p.direccion ? `<div>Entrega: ${esc(p.direccion)}<br>Tel. ${esc(p.telefono || '')}</div>` : ''}${f('Servicio', esc(donde(p)))}${f('Cocinero', esc(p.cocineroNombre || '—'))}${f('Fecha', fmt(v ? v.fecha : p.entregado || p.creado))}${f('Atendió', esc(p.meseroNombre || ''))}
 ${v?.fis ? `<hr><div>${esc(v.fis.nombre)}<br>NIT ${esc(v.fis.nit)}<br>NRC ${esc(v.fis.nrc)}</div>` : ''}
 <hr><table>${p.lineas.map(fila).join('')}</table><hr>
-${f('Subtotal sin IVA', $(sub))}${f(`IVA ${iva} %`, $(im))}${pr ? f('Propina', $(pr)) : ''}<div class="f t"><span>TOTAL</span><span>${$(tot + pr)}</span></div>
-${pago ? `<hr>${pago}` : ''}<hr><div class="c">¡Gracias por su visita!</div></body></html>`;
+${p.envio > 0 ? f('Envío (incluido)', $(p.envio)) : ''}${f('Subtotal sin IVA', $(sub))}${f(`IVA ${iva} %`, $(im))}${pr ? f('Propina', $(pr)) : ''}<div class="f t"><span>TOTAL</span><span>${$(tot + pr)}</span></div>
+${pago ? `<hr>${pago}` : ''}${v?.codigo ? `<hr><small>Código de generación:<br>${esc(v.codigo)}<br>Sello de recepción:<br>${esc(v.sello)}<br>(DTE simulado · sin validez ante Hacienda)</small>` : ''}${v?.estrellas ? `<div class="c">Valoración: ${'★'.repeat(v.estrellas)}${'☆'.repeat(5 - v.estrellas)}</div>` : ''}<hr><div class="c">¡Gracias por su visita!</div></body></html>`;
 }
 
 /** Imprime el ticket en un iframe oculto. */

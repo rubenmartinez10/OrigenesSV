@@ -38,6 +38,7 @@ export function TicketPedido({ p, catalogo, receta }) {
       <b>{nom(p)} · {donde(p)}</b>
       {p.rep && <div className="tw:text-tx2">Repone el pedido #{p.repNum} · sin cobro adicional</div>}
       <div className="tw:text-tx2">{fmt(p.creado)}</div>
+      {p.tipo === 'Delivery' && p.direccion && <div className="tw:text-tx2">Entrega: {p.direccion} · Tel. {p.telefono}</div>}
       {p.lineas.map((l) => (
         <div key={l.orden}>
           {txt(l)}
@@ -47,6 +48,7 @@ export function TicketPedido({ p, catalogo, receta }) {
           )}
         </div>
       ))}
+      {p.envio > 0 && <div>Envío — {$(p.envio)}</div>}
     </Card>
   );
 }
@@ -61,11 +63,13 @@ export function Documento({ v, iva = 13 }) {
       <div className="tw:text-tx2">Sucursal: {v.sucNombre} · Cocinero: {v.cocineroNombre || '—'}</div>
       {v.fis && <div>{v.fis.nombre} · NIT {v.fis.nit} · NRC {v.fis.nrc}</div>}
       {v.lineas.map((l) => <div key={l.orden}>{txt(l)} — {$(l.unit * l.cant)}</div>)}
+      {v.ped?.envio > 0 && <div>Envío (incluido) — {$(v.ped.envio)}</div>}
       <div>Subtotal sin IVA {$(v.sub)}</div>
       <div>IVA {iva} % {$(v.iva)}</div>
       <b>Total {$(v.total)}</b>
       {v.propina > 0 && <div>Propina {$(v.propina)} · Total pagado {$(v.total + v.propina)}</div>}
       <div className="tw:text-tx2">{v.metodo}{v.ref ? ` · ${v.ref}` : ''}</div>
+      {v.codigo && <div className="tw:text-tx2 tw:text-[11.5px] tw:break-all">Código de generación: {v.codigo}<br />Sello de recepción: {v.sello}<br /><i>DTE simulado · sin validez ante Hacienda</i></div>}
       {v.pago?.recibido != null && <div className="tw:text-tx2">Recibido {$(v.pago.recibido)} · Cambio {$(v.pago.cambio)}</div>}
     </Card>
   );

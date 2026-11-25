@@ -4,6 +4,7 @@ import { Form } from 'react-bootstrap';
 import { $ } from '../../lib/formato.js';
 import { useDatos } from '../../context/Sesion.jsx';
 import { Btn, Card, Cargando, Kpi, Kv, Panel as Lateral, Pildoras, Stack, Tabla, Vacio } from '../../components/ui.jsx';
+import Tendencia from '../../components/Tendencia.jsx';
 import { Barras, Tablero } from '../../components/Graficas.jsx';
 
 /* Gerente general · 7.1 Panel de franquicia */
@@ -44,6 +45,7 @@ export default function PanelGG() {
         </Card>
       </div>
       <Tablero d={d} n={f.per === '30 días' ? 30 : 7} />
+      <Tendencia endpoint="/gg/tendencia" per={f.per} suc={f.suc} />
       {d.filas.length ? <Tabla cols={['Sucursal', 'Ventas', 'Gastos', 'Pendientes']} filas={d.filas.map((x) => ({
         onClick: () => setVer(x.id), celdas: [x.nombre, $(x.ventas), $(x.gastos), x.pendientes],
       }))} /> : <Vacio ic="box">Sin movimientos en este periodo</Vacio>}

@@ -2,12 +2,12 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { q, tx, ts } from '../db.js';
 import { si, noEncontrado, motivo as validarMotivo } from '../lib/errores.js';
-import { ahora, D, lunes, semanaKey } from '../lib/reloj.js';
+import { ahora, D, lunes, semanaKey, fFecha } from '../lib/reloj.js';
 import { bitacora, notificar } from '../lib/registro.js';
 import { cfg, r2, TURNOS, turnosDe } from '../lib/negocio.js';
 import { cargarSolicitudes } from '../lib/consultas.js';
 import {
-  NIVEL, ROLN, ROLES_SUC, activos, historial, ultimoRol, vacanteSiFalta, usuarioPorId, turnoHoy,
+  NIVEL, ROLN, ROLES_SUC, activos, historial, ultimoRol, vacanteSiFalta, usuarioPorId, turnoHoy, decidirRetiro, solicitarDespido, indemnizacionDe,
 } from '../lib/personal.js';
 import { quincenas, qLabel, generarPlanilla, filaJson } from '../lib/nomina.js';
 
@@ -37,14 +37,15 @@ const celdaValida = (x) => x === '' || !!TURNOS[x] || (/^\d{1,2}-\d{1,2}$/.test(
 async function personas(c, where = 'TRUE', params = []) {
   const { rows } = await c.query(
     `SELECT u.*, r.salario AS salario_rol, s.nombre AS suc_nombre,
-            EXISTS (SELECT 1 FROM solicitudes x WHERE x.tipo = 'Despido' AND x.usuario_id = u.id AND x.estado = 'Solicitada') AS desp
+            EXISTS (SELECT 1 FROM solicitudes x WHERE x.tipo = 'Despido' AND x.usuario_id = u.id AND x.estado = 'Solicitada') AS desp,
+            EXISTS (SELECT 1 FROM solicitudes x WHERE x.tipo = 'Renuncia' AND x.usuario_id = u.id AND x.estado = 'Solicitada' AND x.datos->>'salio' IS NULL) AS ren
        FROM usuarios u JOIN roles r ON r.id = u.rol_id LEFT JOIN sucursales s ON s.id = u.sucursal_id WHERE ${where} ORDER BY u.nombre`, params);
   return rows.map((u) => {
-    const estado = u.estado === 'Despedido' ? 'Despedido' : u.desp ? 'Despido solicitado' : 'Activo';
+    const estado = ['Despedido', 'Renunció'].includes(u.estado) ? u.estado : u.ren ? 'Renuncia presentada' : u.desp ? 'Despido solicitado' : u.reubicacion_desde ? 'Pendiente de reubicación' : 'Activo';
     const puede = u.estado === 'Activo' && NIVEL[u.rol_id] < NIVEL.rrhh && !u.desp;
     return {
       id: u.id, nombre: u.nombre, usuario: u.usuario, rol: u.rol_id, rolNombre: ROLN[u.rol_id], suc: u.sucursal_id,
-      sucNombre: u.suc_nombre || 'Gerencia central', ingreso: u.ingreso, foto: u.foto_url, estado, puede,
+      sucNombre: u.suc_nombre || 'Gerencia central', ingreso: u.ingreso, foto: u.foto_url, estado, puede, reubicar: !!u.reubicacion_desde && u.estado === 'Activo' && !u.desp,
       salarioRol: u.salario_rol, extraAnt: u.extra_antiguedad, salario: r2(u.salario_rol + u.extra_antiguedad),
       documento: u.documento, telefono: u.telefono, correo: u.correo, fechaBaja: u.fecha_baja,
       ascensos: puede ? BAJOS.filter((x) => NIVEL[x] > NIVEL[u.rol_id]).map((x) => ({ id: x, nombre: ROLN[x] })) : [],
@@ -59,6 +60,13 @@ async function rolesInfo(c) {
 
 r.get('/empleados', async (req, res) => {
   res.json({ personas: await personas(DB), sucursales: await sucursalesOp(DB), roles: await rolesInfo(DB), bajos: BAJOS, turnos: Object.keys(TURNOS) });
+});
+
+/** ¿Ese DUI ya perteneció a alguien? Sirve para avisar en el formulario si es una recontratación. */
+r.get('/empleados/dui/:dui', async (req, res) => {
+  const { rows } = await q('SELECT u.nombre, u.estado, u.fecha_baja, u.rol_id, u.ingreso FROM usuarios u WHERE u.documento = $1', [req.params.dui]);
+  const x = rows[0];
+  res.json(x ? { existe: true, nombre: x.nombre, estado: x.estado, fechaBaja: x.fecha_baja, rol: ROLN[x.rol_id], ingreso: x.ingreso } : { existe: false });
 });
 
 r.get('/empleados/:id', async (req, res) => {
@@ -87,8 +95,15 @@ r.post('/empleados', async (req, res) => {
     const { rows: sc } = await c.query(`SELECT id, nombre FROM sucursales WHERE id = $1 AND estado = 'Operando'`, [b.suc]);
     si(!sc[0], 'Elige una sucursal que esté operando');
     const s = sc[0].id;
-    const { rows: dui } = await c.query(`SELECT 1 FROM usuarios WHERE documento = $1 AND estado = 'Activo'`, [b.doc]);
-    si(dui[0], 'Ya hay una persona activa con ese DUI');
+    const { rows: dui } = await c.query('SELECT * FROM usuarios WHERE documento = $1 FOR UPDATE', [b.doc]);
+    const prev = dui[0] || null;
+    si(prev && prev.estado === 'Activo', 'Ya hay una persona activa con ese DUI');
+    si(prev && norm(prev.nombre) !== norm(nombre), `Ese DUI pertenece a ${prev?.nombre} (ex empleado). Escribe su nombre tal como está registrado`);
+    si(prev && NIVEL[prev.rol_id] >= NIVEL.rrhh, 'Ese DUI pertenece a una persona de la gerencia central: no se puede recontratar desde aquí');
+    if (mail) {
+      const { rows: mm } = await c.query('SELECT nombre FROM usuarios WHERE lower(correo) = lower($1) AND ($2::int IS NULL OR id <> $2)', [mail, prev?.id ?? null]);
+      si(mm[0], 'Ese correo ya está registrado por otra persona');
+    }
     if (b.rol === 'gerente') si((await activos(c, s, 'gerente')).length, 'La sucursal ya tiene gerente');
     let vac = null;
     if (b.vacante) {
@@ -97,24 +112,57 @@ r.post('/empleados', async (req, res) => {
       si(v[0].rol_id !== b.rol || v[0].sucursal_id !== s, 'La vacante es de otro rol o sucursal');
       vac = v[0];
     }
-    const login = await usuarioDe(c, nombre);
     const pass = temporal();
     const clave = b.rol === 'gerente' ? claveNueva() : null;
-    const { rows: ins } = await c.query(
-      `INSERT INTO usuarios (usuario, nombre, rol_id, sucursal_id, pass_hash, clave_hash, documento, telefono, correo, ingreso, cambiar_pass)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE) RETURNING id`,
-      [login, nombre, b.rol, s, await bcrypt.hash(pass, 10), clave ? await bcrypt.hash(clave, 10) : null, b.doc, b.tel, mail || null, ts(ingreso)]);
-    const id = ins[0].id;
+    let id; let login;
+    if (prev) {
+      // misma persona (mismo DUI): se reactiva su cuenta y se conserva su historial; la antigüedad vuelve a empezar
+      login = prev.usuario; id = prev.id;
+      await c.query(
+        `UPDATE usuarios SET estado = 'Activo', fecha_baja = NULL, rol_id = $2, sucursal_id = $3, pass_hash = $4, clave_hash = $5, telefono = $6, correo = $7, ingreso = $8,
+                antig_aplicada = 0, extra_antiguedad = 0, cambiar_pass = TRUE, recup_pass = FALSE, intentos_clave = 0, reubicacion_desde = NULL WHERE id = $1`,
+        [id, b.rol, s, await bcrypt.hash(pass, 10), clave ? await bcrypt.hash(clave, 10) : null, b.tel, mail || null, ts(ingreso)]);
+      await c.query('DELETE FROM turnos WHERE usuario_id = $1 AND semana IS NULL', [id]);
+    } else {
+      login = await usuarioDe(c, nombre);
+      const { rows: ins } = await c.query(
+        `INSERT INTO usuarios (usuario, nombre, rol_id, sucursal_id, pass_hash, clave_hash, documento, telefono, correo, ingreso, cambiar_pass)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE) RETURNING id`,
+        [login, nombre, b.rol, s, await bcrypt.hash(pass, 10), clave ? await bcrypt.hash(clave, 10) : null, b.doc, b.tel, mail || null, ts(ingreso)]);
+      id = ins[0].id;
+    }
     await c.query('INSERT INTO turnos (usuario_id, semana, dias) VALUES ($1, NULL, $2)', [id, turnoBase(b.rol, b.turno)]);
-    await historial(c, id, 'Contratación', `${ROLN[b.rol]} · ${sc[0].nombre}`, u.nombre);
+    await historial(c, id, prev ? 'Recontratación' : 'Contratación', prev ? `${ROLN[b.rol]} · ${sc[0].nombre} (antes ${ROLN[prev.rol_id]}, baja el ${fFecha(prev.fecha_baja)})` : `${ROLN[b.rol]} · ${sc[0].nombre}`, u.nombre);
     if (vac) {
       await c.query(`UPDATE vacantes SET cubiertas = cubiertas + 1, estado = CASE WHEN cubiertas + 1 >= cantidad THEN 'Cubierta' ELSE estado END WHERE id = $1`, [vac.id]);
     }
     await notificar(c, 'gerente', s, 'Nueva persona en tu equipo', `${nombre} · ${ROLN[b.rol]}`);
-    await bitacora(c, u, { accion: 'empleado.contratar', elemento: login, despues: { rol: b.rol, sucursal: s }, sucursal: s });
-    return { usuario: login, nombre, pass, clave };
+    await bitacora(c, u, { accion: prev ? 'empleado.recontratar' : 'empleado.contratar', elemento: login, despues: { rol: b.rol, sucursal: s }, sucursal: s });
+    return { usuario: login, nombre: prev ? prev.nombre : nombre, pass, clave, recontratado: !!prev };
   });
   res.status(201).json(out);
+});
+
+/** Personal de una sucursal cerrada: pasa a otra sucursal cubriendo una vacante de su mismo rol (conserva su antigüedad). */
+r.post('/empleados/:id/reubicar', async (req, res) => {
+  const u = req.usuario;
+  await tx(async (c) => {
+    const x = await usuarioPorId(c, req.params.id);
+    si(x.estado !== 'Activo' || !x.reubicacion_desde, 'Esta persona no está pendiente de reubicación');
+    const { rows: v } = await c.query(`SELECT v.*, s.nombre AS suc_nombre FROM vacantes v JOIN sucursales s ON s.id = v.sucursal_id
+                                        WHERE v.id = $1 AND v.estado = 'Abierta' AND s.estado = 'Operando' FOR UPDATE OF v`, [req.body?.vacante]);
+    si(!v[0], 'Elige una vacante abierta');
+    si(v[0].rol_id !== x.rol_id, `Esa vacante es de ${ROLN[v[0].rol_id]}, y la persona es ${ROLN[x.rol_id]}`);
+    if (x.rol_id === 'gerente') si((await activos(c, v[0].sucursal_id, 'gerente')).length, 'La sucursal ya tiene gerente');
+    const { rows: ant } = await c.query('SELECT nombre FROM sucursales WHERE id = $1', [x.sucursal_id]);
+    await c.query('UPDATE usuarios SET sucursal_id = $2, reubicacion_desde = NULL WHERE id = $1', [x.id, v[0].sucursal_id]);
+    await c.query(`UPDATE vacantes SET cubiertas = cubiertas + 1, estado = CASE WHEN cubiertas + 1 >= cantidad THEN 'Cubierta' ELSE estado END WHERE id = $1`, [v[0].id]);
+    await historial(c, x.id, 'Reubicación', `${ant[0]?.nombre} → ${v[0].suc_nombre} · conserva su antigüedad`, u.nombre);
+    await notificar(c, 'gerente', v[0].sucursal_id, 'Nueva persona en tu equipo', `${x.nombre} · ${ROLN[x.rol_id]} (reubicación)`);
+    await notificar(c, 'gg', null, 'Personal reubicado', `${x.nombre} · ${ant[0]?.nombre} → ${v[0].suc_nombre}`);
+    await bitacora(c, u, { accion: 'empleado.reubicar', elemento: x.usuario, antes: { sucursal: x.sucursal_id }, despues: { sucursal: v[0].sucursal_id }, sucursal: v[0].sucursal_id });
+  });
+  res.json({ ok: true });
 });
 
 r.post('/empleados/:id/ascender', async (req, res) => {
@@ -144,17 +192,39 @@ r.post('/empleados/:id/despido', async (req, res) => {
   const out = await tx(async (c) => {
     const x = await usuarioPorId(c, req.params.id);
     si(x.estado !== 'Activo' || NIVEL[x.rol_id] >= NIVEL.rrhh, 'No puedes solicitar el despido de esta persona');
-    const { rows: ya } = await c.query(`SELECT 1 FROM solicitudes WHERE tipo = 'Despido' AND usuario_id = $1 AND estado = 'Solicitada'`, [x.id]);
-    si(ya[0], 'Ya hay un despido solicitado para esta persona');
-    const ap = x.rol_id === 'gerente' || !x.sucursal_id ? 'gg' : 'gerente';
-    await c.query(
-      `INSERT INTO solicitudes (tipo, estado, sucursal_id, solicitante_id, usuario_id, aprueba_rol, nombre, motivo, fecha)
-       VALUES ('Despido','Solicitada',$1,$2,$3,$4,$5,$6,$7)`, [x.sucursal_id, u.id, x.id, ap, x.nombre, m, ts(ahora())]);
-    await notificar(c, ap, ap === 'gg' ? null : x.sucursal_id, 'Despido por aprobar', `${x.nombre} · ${m}`);
-    await bitacora(c, u, { accion: 'despido.solicitar', elemento: x.usuario, motivo: m, sucursal: x.sucursal_id });
-    return { aprueba: ap === 'gg' ? 'el gerente general' : 'el gerente de la sucursal' };
+    return solicitarDespido(c, x, u, m);
   });
   res.status(201).json(out);
+});
+
+/** Despidos que pidió un gerente de sucursal: Recursos Humanos revisa la razón y la indemnización antes de pasarlos al gerente general. */
+r.post('/despidos/:id/aceptar', async (req, res) => {
+  const u = req.usuario;
+  await tx(async (c) => {
+    const { rows } = await c.query(`SELECT * FROM solicitudes WHERE id = $1 AND tipo = 'Despido' AND aprueba_rol = 'rrhh' AND estado = 'Solicitada' FOR UPDATE`, [req.params.id]);
+    const x = rows[0];
+    si(!x, 'Este despido ya fue revisado');
+    const ind = await indemnizacionDe(c, await usuarioPorId(c, x.usuario_id));
+    await c.query(`UPDATE solicitudes SET aprueba_rol = 'gg', datos = datos || $2::jsonb WHERE id = $1`,
+      [x.id, JSON.stringify({ rrhh: { por: u.nombre, fecha: ahora() }, indemnEstimada: ind })]);
+    await notificar(c, 'gg', null, 'Despido por aprobar', `${x.nombre} · aceptado por Recursos Humanos`);
+    await notificar(c, 'gerente', x.sucursal_id, 'Despido aceptado por Recursos Humanos', `${x.nombre} · falta el gerente general`);
+    await bitacora(c, u, { accion: 'despido.aceptar.rrhh', elemento: x.nombre, motivo: x.motivo, sucursal: x.sucursal_id });
+  });
+  res.json({ ok: true });
+});
+r.post('/despidos/:id/rechazar', async (req, res) => {
+  const u = req.usuario;
+  const m = validarMotivo(req.body?.motivo);
+  await tx(async (c) => {
+    const { rows } = await c.query(`UPDATE solicitudes SET estado = 'Rechazada', rechazo = $2, decidio_id = $3, cierre = $4
+                                    WHERE id = $1 AND tipo = 'Despido' AND aprueba_rol = 'rrhh' AND estado = 'Solicitada' RETURNING nombre, sucursal_id`,
+    [req.params.id, JSON.stringify({ por: 'Recursos Humanos', motivo: m }), u.id, ts(ahora())]);
+    si(!rows[0], 'Este despido ya fue revisado');
+    await notificar(c, 'gerente', rows[0].sucursal_id, 'Despido rechazado por Recursos Humanos', `${rows[0].nombre}: ${m}`);
+    await bitacora(c, u, { accion: 'despido.rechazar.rrhh', elemento: rows[0].nombre, motivo: m, sucursal: rows[0].sucursal_id });
+  });
+  res.json({ ok: true });
 });
 
 r.get('/vacantes', async (req, res) => {
@@ -167,8 +237,15 @@ r.get('/vacantes', async (req, res) => {
   })));
 });
 
+r.post('/renuncias/:id/retiro', async (req, res) => {
+  const aceptar = !!req.body?.aceptar;
+  const m = aceptar ? null : validarMotivo(req.body?.motivo, 'El motivo');
+  await tx(async (c) => decidirRetiro(c, req.params.id, aceptar, req.usuario, m));
+  res.json({ ok: true });
+});
+
 r.get('/despidos', async (req, res) => {
-  const L = await cargarSolicitudes(DB, `s.tipo = 'Despido'`);
+  const L = await cargarSolicitudes(DB, `s.tipo IN ('Despido','Renuncia')`);
   const { rows } = await q('SELECT id, nombre, rol_id FROM usuarios');
   const U = Object.fromEntries(rows.map((x) => [x.id, x]));
   const { rows: dec } = await q('SELECT id, decidio_id FROM solicitudes WHERE id = ANY($1)', [L.map((x) => x.id)]);

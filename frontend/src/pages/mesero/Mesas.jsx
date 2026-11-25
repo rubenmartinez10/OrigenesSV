@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api.js';
 import { fm, fmt } from '../../lib/formato.js';
 import { nom } from '../../lib/pedidos.js';
@@ -10,6 +11,7 @@ export default function Mesas() {
   const { config } = useSesion();
   const { confirmar, accion } = useDialogos();
   const ahora = useAhora();
+  const navigate = useNavigate();
   const { datos } = useDatos('/mesero/mesas', { cada: 5000 });
   if (!datos) return <Cargando />;
   const LIM = (config?.minutosMesa ?? 30) * 60;
@@ -22,8 +24,16 @@ export default function Mesas() {
       accion(() => api.post(`/mesero/mesas/${p.id}/pedir-salida`));
     }
   };
+  const retira = async (p) => {
+    if (await confirmar({ titulo: '¿El cliente ya se va?', texto: `Mesa ${p.mesa} · pedido #${p.num}. Al confirmar podrás cobrarlo.`, verbo: 'Sí, se retira' })) {
+      if (await accion(() => api.post(`/mesero/pedidos/${p.id}/retira`), 'Listo: ya puedes cobrar')) navigate('/mesero/cobro', { state: { pedido: p.id } });
+    }
+  };
+  const cerrado = (p) => ['Cancelado', 'Rechazado'].includes(p.estado);
+  const debe = (p) => p.estado === 'Cancelado' && p.cargo > 0 && !p.pagado;
   const liberar = async (p) => {
-    if (p.estado !== 'Cobrado') return accion(async () => { throw new Error(`Cobra el pedido #${p.num} antes de liberar la mesa`); });
+    if (debe(p)) return accion(async () => { throw new Error(`Cobra los insumos del pedido cancelado #${p.num} antes de liberar la mesa`); });
+    if (p.estado !== 'Cobrado' && !cerrado(p)) return accion(async () => { throw new Error(`Cobra el pedido #${p.num} antes de liberar la mesa`); });
     if (await confirmar({ titulo: '¿Ya se fueron?', texto: `La mesa ${p.mesa} queda libre y puede recibir otro pedido.`, verbo: 'Sí, liberar mesa' })) {
       accion(() => api.post(`/mesero/mesas/${p.id}/liberar`), `Mesa ${p.mesa} libre`);
     }
@@ -38,6 +48,28 @@ export default function Mesas() {
           <CirculoIcono ic="check" tono="ok" className="tw:w-10 tw:h-10 tw:rounded-full" />
           <b className="tw:text-[15px]">Mesa {m}</b>
           <Chip t="Libre" o="ok" />
+        </div>
+      );
+    }
+    if (cerrado(p)) {
+      return (
+        <div key={m} className="tw:relative tw:overflow-hidden tw:flex tw:flex-col tw:gap-2 tw:bg-sf tw:border tw:border-bd tw:rounded-[20px] tw:shadow-osv tw:px-4 tw:py-3.5">
+          <span className="tw:absolute tw:left-0 tw:inset-y-0 tw:w-[5px] tw:bg-er" />
+          <div className="tw:flex tw:items-center tw:gap-2">
+            <b className="tw:text-[15px]">Mesa {m}</b>
+            <span className="tw:flex-1" />
+            <Chip t={p.estado === 'Cancelado' ? 'Pedido cancelado' : 'Pedido rechazado'} o="er" />
+          </div>
+          <div><b>{p.ref || 'Cliente'}</b><span className="tw:text-tx2"> · {nom(p)}</span></div>
+          <small className="tw:text-tx2">El cliente sigue en la mesa: puede pedir otra cosa en esta misma mesa, o libérala cuando se vaya.</small>
+          {debe(p) && <small className="tw:text-er tw:font-semibold">Ya se habían usado los insumos: cobra {`$${p.cargo.toFixed(2)}`} antes de liberar.</small>}
+          {p.estado === 'Cancelado' && p.cargo > 0 && p.pagado && <small className="tw:text-tx2">Insumos cobrados ({`$${p.cargo.toFixed(2)}`}).</small>}
+          <div className="tw:flex tw:flex-col tw:gap-1.5 tw:mt-1.5">
+            {debe(p) && (p.cuentaPedida
+              ? <Btn v="p" onClick={() => navigate('/mesero/cobro', { state: { pedido: p.id } })}>Cobrar insumos</Btn>
+              : <Btn v="p" onClick={() => retira(p)}>El cliente se retira · cobrar insumos</Btn>)}
+            <Btn v={debe(p) ? undefined : 'p'} disabled={debe(p)} onClick={() => liberar(p)}>Ya se fueron · liberar</Btn>
+          </div>
         </div>
       );
     }
@@ -57,10 +89,13 @@ export default function Mesas() {
         {t == null ? <div className="tw:text-tx2">Esperando el platillo · {p.estado}</div>
           : <div>Lleva comiendo {fm(t)} min{pasa ? '' : ` · faltan ${falta} min para poder pedirle que desocupe`}</div>}
         {p.salidaPedida && <small className="tw:text-tx2">Se le pidió desocupar a las {fmt(p.salidaPedida)}</small>}
-        {p.estado === 'Entregado' && <small className="tw:text-tx2">Falta cobrar el pedido</small>}
+        {p.estado === 'Entregado' && <small className="tw:text-tx2">{p.cuentaPedida ? 'El cliente ya se retira: falta cobrar el pedido' : 'Se cobra cuando el cliente se retire'}</small>}
         <div className="tw:flex tw:flex-col tw:gap-1.5 tw:mt-1.5">
           <Btn disabled={!pasa || !!p.salidaPedida} onClick={() => pedir(p)}>{p.salidaPedida ? 'Ya se le pidió' : 'Pedir que desocupe'}</Btn>
-          <Btn v="p" disabled={t == null} onClick={() => liberar(p)}>Ya se fueron · liberar</Btn>
+          {p.estado === 'Entregado' && (p.cuentaPedida
+            ? <Btn v="p" onClick={() => navigate('/mesero/cobro', { state: { pedido: p.id } })}>Cobrar</Btn>
+            : <Btn v="p" onClick={() => retira(p)}>El cliente se retira · cobrar</Btn>)}
+          <Btn v={p.estado === 'Entregado' ? undefined : 'p'} disabled={t == null} onClick={() => liberar(p)}>Ya se fueron · liberar</Btn>
         </div>
       </div>
     );

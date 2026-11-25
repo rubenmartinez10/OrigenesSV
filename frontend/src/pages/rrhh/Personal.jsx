@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Dropdown, Form, Modal } from 'react-bootstrap';
 import { api } from '../../lib/api.js';
 import { $, D, fFecha, fmt, fTel, valCorreo, valTel } from '../../lib/formato.js';
@@ -9,7 +9,7 @@ import { Avatar, Ban, Btn, Campo, Cargando, Chip, Err, Etapas, Kv, Mut, Panel, S
 import { Contrasenas, Credenciales } from '../../components/Franquicia.jsx';
 
 /* Recursos Humanos · 6.1 Personal: empleados, vacantes, despidos y contraseñas */
-const TONO = { Activo: 'ok', 'Despido solicitado': 'wa', Despedido: 'er' };
+const TONO = { Activo: 'ok', 'Despido solicitado': 'wa', 'Renuncia presentada': 'wa', Despedido: 'er', Renunció: 'g', 'Pendiente de reubicación': 'wa' };
 const F = { q: '', suc: '', rol: '', est: 'Activo' };
 const norm = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 const fDui = (v) => { const d = String(v).replace(/\D/g, '').slice(0, 9); return d.length > 8 ? `${d.slice(0, 8)}-${d.slice(8)}` : d; };
@@ -25,7 +25,15 @@ function Contratar({ datos, vac, onHide, onCred }) {
   const { accion } = useDialogos();
   const [E, setE] = useState({ nombre: '', doc: '', tel: '', mail: '', turno: 'Mañana', rol: vac?.rol || 'mesero', suc: vac?.suc || datos.sucursales[0]?.id, ingreso: hoyIso(ahora) });
   const [er, setEr] = useState('');
+  const [prev, setPrev] = useState(null);
   const set = (x) => setE({ ...E, ...x });
+  // si el DUI ya perteneció a alguien, se avisa: es una recontratación (misma persona, mismo historial)
+  useEffect(() => {
+    if (!/^\d{8}-\d$/.test(E.doc)) { setPrev(null); return undefined; }
+    let vivo = true;
+    api.get(`/rrhh/empleados/dui/${E.doc}`).then((r) => { if (vivo) setPrev(r.existe ? r : null); }).catch(() => {});
+    return () => { vivo = false; };
+  }, [E.doc]);
   const errores = [
     E.nombre.trim().split(/\s+/).length < 2 && 'Escribe el nombre completo (nombre y apellido)',
     !/^\d{8}-\d$/.test(E.doc) && 'El DUI debe tener el formato 00000000-0',
@@ -36,14 +44,17 @@ function Contratar({ datos, vac, onHide, onCred }) {
     try {
       const r = await api.post('/rrhh/empleados', { ...E, vacante: vac?.id });
       await accion(async () => {}, vac ? 'Vacante cubierta' : 'Empleado contratado');
-      onCred([['Nombre', r.nombre], ['Usuario', r.usuario], ['Contraseña temporal', r.pass], ...(r.clave ? [['Clave de aprobaciones', r.clave]] : [])]);
+      onCred([...(r.recontratado ? [['Recontratación', 'Se reactivó la cuenta anterior y se conservó su historial']] : []), ['Nombre', r.nombre], ['Usuario', r.usuario], ['Contraseña temporal', r.pass], ...(r.clave ? [['Clave de aprobaciones', r.clave]] : [])]);
       onHide();
     } catch (x) { setEr(x.message); }
   };
   return (
-    <Panel show onHide={onHide} titulo={vac ? 'Cubrir vacante' : 'Contratar'} pie={[<Btn key="c" v="t" onClick={onHide}>Cancelar</Btn>, <Btn key="k" v="p" disabled={errores.length > 0} onClick={contratar}>Contratar</Btn>]}>
+    <Panel show onHide={onHide} titulo={vac ? 'Cubrir vacante' : 'Contratar'} pie={[<Btn key="c" v="t" onClick={onHide}>Cancelar</Btn>, <Btn key="k" v="p" disabled={errores.length > 0 || prev?.estado === 'Activo'} onClick={contratar}>{prev && prev.estado !== 'Activo' ? 'Recontratar' : 'Contratar'}</Btn>]}>
       <Campo l="Nombre completo"><Form.Control value={E.nombre} onChange={(e) => set({ nombre: e.target.value })} /></Campo>
       <Campo l="DUI"><Form.Control inputMode="numeric" placeholder="00000000-0" value={E.doc} onChange={(e) => set({ doc: fDui(e.target.value) })} /></Campo>
+      {prev && (prev.estado === 'Activo'
+        ? <Err>Ya hay una persona activa con ese DUI: {prev.nombre}.</Err>
+        : <Ban><b>{prev.nombre} ya trabajó aquí</b> como {prev.rol}{prev.fechaBaja ? ` (baja el ${fFecha(prev.fechaBaja)})` : ''}. Se reactivará su misma cuenta y se conservará su historial; la antigüedad empieza de nuevo. Escribe su nombre tal como está registrado.</Ban>)}
       <Campo l="Teléfono"><Form.Control inputMode="numeric" placeholder="0000-0000" value={E.tel} onChange={(e) => set({ tel: fTel(e.target.value) })} /></Campo>
       <Campo l="Correo electrónico (opcional)"><Form.Control type="email" placeholder="nombre@correo.com" value={E.mail} onChange={(e) => set({ mail: e.target.value })} /></Campo>
       <Campo l="Rol"><Form.Select disabled={!!vac} value={E.rol} onChange={(e) => set({ rol: e.target.value })}>
@@ -76,9 +87,34 @@ function Ficha({ id, onHide }) {
         ['Aumento por antigüedad', $(u.extraAnt)], ['Turno de hoy', u.sinTurno ? 'Sin turno asignado' : u.turno || '—'], ['Ingreso', fFecha(u.ingreso)],
         ['Antigüedad', antig(u.ingreso, ahora)], ['Documento', u.documento || '—'], ['Contacto', u.telefono || u.correo || '—'],
       ]} />
+      {u.estado === 'Renunció' && <Ban>Renunció el {fFecha(u.fechaBaja)}: terminó su última jornada y ya no tiene acceso. Su historial se conserva; si vuelve a contratarse con el mismo DUI se reactiva esta misma cuenta.</Ban>}
+      {u.estado === 'Renuncia presentada' && <Ban>Presentó su renuncia: hoy es su último día y su vacante ya está abierta. Al terminar su jornada (o al acabar el día) pierde el acceso.</Ban>}
       {u.indemn && <Ban>Despedido. Indemnización calculada: {$(u.indemn.monto)}</Ban>}
+      {u.estado === 'Pendiente de reubicación' && <Ban>Su sucursal cerró. No puede trabajar hasta que Recursos Humanos la reubique en una vacante de su mismo rol o se apruebe su despido.</Ban>}
       <h4 className="tw:text-sm tw:m-0">Historial</h4>
       {u.historial.length ? <Tabla cols={['Fecha', 'Evento', 'Detalle']} filas={u.historial.map((h) => [fFecha(h.fecha), h.tipo, h.detalle])} /> : <Vacio ic="list">Sin movimientos</Vacio>}
+    </Panel>
+  );
+}
+
+/* ---------- reubicar a quien trabajaba en una sucursal que cerró ---------- */
+function Reubicar({ u, onHide, onDespido }) {
+  const { accion } = useDialogos();
+  const { datos } = useDatos('/rrhh/vacantes');
+  const [v, setV] = useState('');
+  const L = (datos || []).filter((x) => x.rol === u.rol);
+  return (
+    <Panel show onHide={onHide} titulo={`Reubicar a ${u.nombre}`}
+      pie={[<Btn key="c" v="t" onClick={onHide}>Cancelar</Btn>,
+        <Btn key="d" v="red" onClick={() => { onHide(); onDespido(u); }}>Solicitar despido</Btn>,
+        <Btn key="k" v="p" disabled={!v} onClick={async () => { if (await accion(() => api.post(`/rrhh/empleados/${u.id}/reubicar`, { vacante: +v }), 'Persona reubicada')) onHide(); }}>Reubicar</Btn>]}>
+      <Mut>{u.rolNombre} de {u.sucNombre} (cerrada). Conserva su antigüedad y su salario.</Mut>
+      {!datos ? <Cargando /> : L.length ? (
+        <Campo l="Vacante de su mismo rol"><Form.Select value={v} onChange={(e) => setV(e.target.value)}>
+          <option value="">Elige una vacante</option>
+          {L.map((x) => <option key={x.id} value={x.id}>{x.sucNombre} · prioridad {x.prioridad.toLowerCase()}</option>)}
+        </Form.Select></Campo>
+      ) : <Ban>No hay vacantes abiertas de {u.rolNombre}. Si no hay dónde ubicarla, usa «Solicitar despido»: lo aprueba el gerente general y se calcula su indemnización. La persona también puede renunciar desde su perfil.</Ban>}
     </Panel>
   );
 }
@@ -91,13 +127,13 @@ function Empleados() {
   const [ver, setVer] = useState(null);
   const [alta, setAlta] = useState(false);
   const [asc, setAsc] = useState(null);
+  const [reub, setReub] = useState(null);
   const [cred, setCred] = useState(null);
   const setF = (x) => { Object.assign(F, x); setFS({ ...F }); };
   if (!datos) return <Cargando />;
   const L = datos.personas.filter((u) => (!f.suc || u.suc === +f.suc) && (!f.rol || u.rol === f.rol) && (!f.est || u.estado === f.est) && (!f.q || norm(u.nombre).includes(norm(f.q))));
   const despido = async (u) => {
-    const quien = u.rol === 'gerente' || !u.suc ? 'el gerente general' : `el gerente de ${u.sucNombre}`;
-    const m = await motivo({ titulo: `Razón del despido de ${u.nombre}`, nota: `Lo aprobará ${quien}. Sigue activo hasta que se apruebe.` });
+    const m = await motivo({ titulo: `Razón del despido de ${u.nombre}`, nota: 'Lo aprobará el gerente general, con la indemnización del art. 58. Sigue activo hasta que se apruebe.' });
     if (m) await accion(() => api.post(`/rrhh/empleados/${u.id}/despido`, { motivo: m }), 'Solicitud enviada. Sigue activo hasta que se apruebe');
   };
   return (
@@ -111,7 +147,7 @@ function Empleados() {
           <option value="">Todos los roles</option>{datos.roles.map((r) => <option key={r.id} value={r.id}>{r.nombre}</option>)}
         </Form.Select>
         <Form.Select value={f.est} onChange={(e) => setF({ est: e.target.value })} className="tw:max-w-[190px]" aria-label="Estado">
-          {[['', 'Todos'], ['Activo', 'Activos'], ['Despido solicitado', 'Despido solicitado'], ['Despedido', 'Despedidos']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          {[['', 'Todos'], ['Activo', 'Activos'], ['Pendiente de reubicación', 'Por reubicar'], ['Despido solicitado', 'Despido solicitado'], ['Renuncia presentada', 'Renuncia presentada'], ['Despedido', 'Despedidos'], ['Renunció', 'Renunciaron']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </Form.Select>
         <span className="tw:flex-1" />
         <Btn v="p" onClick={() => setAlta(true)}><Icono n="plus" />Contratar</Btn>
@@ -125,7 +161,8 @@ function Empleados() {
               <Dropdown align="end">
                 <Dropdown.Toggle variant="osv-t" size="sm" aria-label={`Acciones para ${u.nombre}`}>⋯</Dropdown.Toggle>
                 <Dropdown.Menu>
-                  <Dropdown.Item disabled={!u.ascensos.length} onClick={() => setAsc(u)}>Ascender</Dropdown.Item>
+                  {u.reubicar && <Dropdown.Item onClick={() => setReub(u)}>Reubicar en otra sucursal</Dropdown.Item>}
+                  <Dropdown.Item disabled={!u.ascensos.length || u.reubicar} onClick={() => setAsc(u)}>Ascender</Dropdown.Item>
                   <Dropdown.Item className="tw:text-er" onClick={() => despido(u)}>Solicitar despido</Dropdown.Item>
                 </Dropdown.Menu>
               </Dropdown>
@@ -133,6 +170,7 @@ function Empleados() {
           ) : ''],
       }))} /> : <Vacio ic="users">No hay empleados con ese filtro</Vacio>}
       {ver && <Ficha id={ver} onHide={() => setVer(null)} />}
+      {reub && <Reubicar u={reub} onHide={() => setReub(null)} onDespido={despido} />}
       {alta && <Contratar datos={datos} onHide={() => setAlta(false)} onCred={setCred} />}
       {asc && <Ascender u={asc} datos={datos} onHide={() => setAsc(null)} onCred={setCred} />}
       <Credenciales titulo={cred?.some(([k]) => k === 'Usuario') ? 'Empleado contratado' : 'Nueva clave de aprobaciones'} filas={cred} onHide={() => setCred(null)} />
@@ -190,22 +228,48 @@ function Vacantes() {
 }
 
 function Despidos() {
+  const { accion, motivo } = useDialogos();
   const { datos } = useDatos('/rrhh/despidos');
   const [ver, setVer] = useState(null);
   if (!datos) return <Cargando />;
-  const est = (x) => (x.estado === 'Aplicada' ? 'Aprobado' : x.estado === 'Solicitada' ? 'Solicitado' : x.estado === 'Cancelada' ? 'Cancelado' : 'Rechazado');
+  const est = (x) => (x.estado === 'Aplicada' ? (x.tipo === 'Renuncia' ? 'Terminada' : 'Aprobado') : x.estado === 'Solicitada' ? (x.tipo === 'Renuncia' ? 'Último día' : 'Solicitado') : x.estado === 'Cancelada' ? (x.datos?.retiro?.estado === 'Aceptado' ? 'Retirada' : 'Cancelado') : 'Rechazado');
   const x = ver && datos.find((s) => s.id === ver);
   const ind = x?.datos?.indemn;
+  const retiroPend = x?.tipo === 'Renuncia' && x.datos?.retiro?.estado === 'Solicitado' && x.rolNombre !== 'Recursos Humanos' && !x.datos?.salio;
+  const decidir = async (aceptar) => {
+    const m = aceptar ? null : await motivo({ titulo: 'Motivo para no aceptar el retiro' });
+    if (!aceptar && !m) return;
+    if (await accion(() => api.post(`/rrhh/renuncias/${x.id}/retiro`, { aceptar, motivo: m }), aceptar ? 'Renuncia retirada: se queda en su puesto' : 'Retiro rechazado: hoy sigue siendo su último día')) setVer(null);
+  };
+  const revisar = x?.tipo === 'Despido' && x.estado === 'Solicitada' && x.aprueba === 'rrhh';
+  const decidirDespido = async (aceptar) => {
+    const m = aceptar ? null : await motivo({ titulo: 'Motivo para rechazar el despido' });
+    if (!aceptar && !m) return;
+    if (await accion(() => api.post(`/rrhh/despidos/${x.id}/${aceptar ? 'aceptar' : 'rechazar'}`, aceptar ? {} : { motivo: m }),
+      aceptar ? 'Aceptado: pasa al gerente general' : 'Despido rechazado: se avisó al gerente')) setVer(null);
+  };
+  const pie = [
+    ...(retiroPend ? [<Btn key="rr" onClick={() => decidir(false)}>Rechazar retiro</Btn>, <Btn key="ra" v="p" onClick={() => decidir(true)}>Aceptar retiro</Btn>] : []),
+    ...(revisar ? [<Btn key="dr" onClick={() => decidirDespido(false)}>Rechazar</Btn>, <Btn key="da" v="p" onClick={() => decidirDespido(true)}>Aceptar y pasar al gerente general</Btn>] : []),
+  ];
+  const etapa = (s) => (s.estado === 'Aplicada' ? 4 : s.aprueba === 'gg' ? 2 : 1); // pasos ya cumplidos
   return (
     <Stack>
-      {datos.length ? <Tabla cols={['Empleado', 'Rol', 'Fecha', 'Estado']} filas={datos.map((s) => ({
+      {datos.length ? <Tabla cols={['Empleado', 'Rol', 'Salida', 'Fecha', 'Estado']} filas={datos.map((s) => ({
         onClick: () => setVer(s.id),
-        celdas: [s.usuarioNombre, s.rolNombre || '—', fmt(s.fecha), <><Chip t={est(s)} o={est(s) === 'Aprobado' ? 'ok' : est(s) === 'Solicitado' ? 'g' : 'er'} />{s.rechazo && <div className="tw:text-er tw:text-xs">Motivo: {s.rechazo.motivo}</div>}</>],
-      }))} /> : <Vacio ic="list">Aún no hay despidos</Vacio>}
+        celdas: [s.usuarioNombre, s.rolNombre || '—', s.tipo === 'Renuncia' ? 'Renuncia' : 'Despido', fmt(s.fecha), <><Chip t={est(s)} o={['Aprobado', 'Terminada'].includes(est(s)) ? 'ok' : ['Solicitado', 'Último día', 'Retirada'].includes(est(s)) ? 'g' : 'er'} />{s.rechazo && <div className="tw:text-er tw:text-xs">Motivo: {s.rechazo.motivo}</div>}</>],
+      }))} /> : <Vacio ic="list">Aún no hay despidos ni renuncias</Vacio>}
       {x && (
-        <Panel show onHide={() => setVer(null)} titulo={`Despido · ${x.usuarioNombre}`} estado={est(x)} ro>
-          <Etapas l={['Solicitado', x.aprueba === 'gg' ? 'Gerente general' : 'Gerente de sucursal', 'Aplicado']} a={x.estado === 'Aplicada' ? 3 : 1} rech={['Rechazada', 'Cancelada'].includes(x.estado) ? 1 : undefined} />
-          <Kv pares={[['Empleado', x.usuarioNombre], ['Rol', x.rolNombre || '—'], ['Razón', x.motivo], ['Lo pidió', x.solicitanteNombre], ['Lo aprueba', x.aprueba === 'gg' ? 'Gerente general' : 'Gerente de sucursal']]} />
+        <Panel show onHide={() => setVer(null)} titulo={`${x.tipo === 'Renuncia' ? 'Renuncia' : 'Despido'} · ${x.usuarioNombre}`} estado={est(x)} ro={!pie.length} pie={pie.length ? pie : undefined}>
+          {x.tipo === 'Renuncia'
+            ? <Etapas l={['Presentada', 'Terminó su jornada']} a={x.estado === 'Aplicada' ? 2 : 1} rech={['Rechazada', 'Cancelada'].includes(x.estado) ? 1 : undefined} />
+            : <Etapas l={['Solicitado', 'Recursos Humanos', 'Gerente general', 'Aplicado']} a={etapa(x)} rech={['Rechazada', 'Cancelada'].includes(x.estado) ? etapa(x) : undefined} />}
+          <Kv pares={[['Empleado', x.usuarioNombre], ['Rol', x.rolNombre || '—'], [x.tipo === 'Renuncia' ? 'Motivo' : 'Razón', x.motivo], [x.tipo === 'Renuncia' ? 'La presentó' : 'Lo pidió', x.solicitanteNombre],
+            x.tipo === 'Renuncia' ? ['Aprobación', 'No requiere: la decisión es de la persona'] : ['Falta', x.estado !== 'Solicitada' ? '—' : x.aprueba === 'rrhh' ? 'Revisión de Recursos Humanos' : 'Aprobación del gerente general']]} />
+          {x.tipo === 'Despido' && x.estado === 'Solicitada' && x.datos?.indemnEstimada && (
+            <Kv pares={[['Indemnización estimada', $(x.datos.indemnEstimada.monto)], ['Días', x.datos.indemnEstimada.dias], ['Salario diario base', $(x.datos.indemnEstimada.base)]]} />
+          )}
+          {x.tipo === 'Renuncia' && x.datos?.retiro && <Ban>Retiro: {x.datos.retiro.estado === 'Solicitado' ? `la persona pidió retirarla («${x.datos.retiro.motivo}»)` : x.datos.retiro.estado === 'Aceptado' ? `aceptado por ${x.datos.retiro.decidio}` : `rechazado por ${x.datos.retiro.decidio}: ${x.datos.retiro.motivoRechazo}`}.</Ban>}
           {ind && <>
             <h4 className="tw:text-sm tw:m-0">Indemnización (art. 58 del Código de Trabajo)</h4>
             <Kv pares={[['Años de servicio', ind.anios], ['Días indemnizados', ind.dias], ['Salario diario base', $(ind.base)], ['Total', $(ind.monto)], ['Aprobó', x.decidioNombre || '—']]} />

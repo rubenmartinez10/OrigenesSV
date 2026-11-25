@@ -47,6 +47,11 @@ INSERT INTO sucursales (id, nombre, zona, tamano, estado, mesas, direccion, cost
  (1,'Centro', 'San Salvador','mediana','Operando',14,'Calle Rubén Darío #214, San Salvador',      310000,'2016-03-07 08:00:00-06'),
  (2,'Escalón','Escalón',     'pequena','Operando', 8,'Col. Escalón, Paseo General Escalón #3810',215000,'2020-08-24 08:00:00-06');
 
+-- fotos de las sucursales (archivos en frontend/public/fotos)
+UPDATE sucursales s SET foto_url = v.u
+FROM (VALUES (1,'/fotos/sucursales/centro.jpg'),(2,'/fotos/sucursales/escalon.jpg')) AS v(id, u)
+WHERE s.id = v.id;
+
 INSERT INTO sucursal_plantilla (sucursal_id, rol_id, cantidad)
 SELECT s.id, pm.rol_id, pm.cantidad FROM sucursales s JOIN plantilla_minima pm ON pm.tamano = s.tamano;
 
@@ -67,7 +72,9 @@ INSERT INTO usuarios (id, usuario, nombre, rol_id, sucursal_id, pass_hash, clave
  (13,'patricia','Patricia Lara',      'rrhh',    NULL, crypt('demo', gen_salt('bf',10)), NULL, NULL, '01876543-7','2019-01-14 08:00:00-06'),
  (14,'hector',  'Héctor Molina',      'gg',      NULL, crypt('demo', gen_salt('bf',10)), crypt('1234', gen_salt('bf',10)), NULL, '00765432-5','2017-06-19 08:00:00-06'),
  (15,'isabel',  'Isabel Quintanilla', 'director',NULL, crypt('demo', gen_salt('bf',10)), NULL, crypt('2468', gen_salt('bf',10)), '00543219-8','2016-03-07 08:00:00-06'),
- (16,'fernando','Fernando Ayala',     'director',NULL, crypt('demo', gen_salt('bf',10)), NULL, crypt('2468', gen_salt('bf',10)), '01432198-3','2020-08-24 08:00:00-06');
+ (16,'fernando','Fernando Ayala',     'director',NULL, crypt('demo', gen_salt('bf',10)), NULL, crypt('2468', gen_salt('bf',10)), '01432198-3','2020-08-24 08:00:00-06'),
+ (17,'sandra',  'Sandra Lemus',       'cocinero',1, crypt('demo', gen_salt('bf',10)), NULL, NULL, '05432198-6','2024-09-02 08:00:00-06'),
+ (18,'jose',    'José Calderón',      'cocinero',2, crypt('demo', gen_salt('bf',10)), NULL, NULL, '03219876-4','2025-03-10 08:00:00-06');
 
 -- años de antigüedad ya reconocidos al arrancar la demo
 UPDATE usuarios SET antig_aplicada = floor(extract(epoch FROM (timestamptz '2026-11-22 09:20:00-06' - ingreso)) / (365.25 * 86400))::int;
@@ -76,10 +83,12 @@ INSERT INTO usuario_historial (usuario_id, fecha, tipo, detalle, por)
 SELECT u.id, u.ingreso, 'Contratación', r.nombre || COALESCE(' · ' || s.nombre, ''), 'Carga inicial'
 FROM usuarios u JOIN roles r ON r.id = u.rol_id LEFT JOIN sucursales s ON s.id = u.sucursal_id;
 
--- Turnos base: cocineros de 7 a 22 todos los días; el resto, mañana o tarde de lunes a viernes
+-- Turnos base: cocineros de 8 h, seis días a la semana (mañana 7–15 con descanso el domingo, tarde 14–22 con descanso el lunes,
+-- una hora de traslape para el relevo); el resto, mañana o tarde de lunes a viernes
 INSERT INTO turnos (usuario_id, semana, dias)
 SELECT id, NULL,
-       CASE WHEN rol_id = 'cocinero' THEN ARRAY['7-22','7-22','7-22','7-22','7-22','7-22','7-22']
+       CASE WHEN rol_id = 'cocinero' AND usuario IN ('carlos','sandra','pedro') THEN ARRAY['','14-22','14-22','14-22','14-22','14-22','14-22']
+            WHEN rol_id = 'cocinero' THEN ARRAY['7-15','7-15','7-15','7-15','7-15','7-15','']
             WHEN id % 2 = 0          THEN ARRAY['Tarde','Tarde','Tarde','Tarde','Tarde','','']
             ELSE                          ARRAY['Mañana','Mañana','Mañana','Mañana','Mañana','',''] END
 FROM usuarios;
@@ -202,6 +211,27 @@ INSERT INTO productos (id, nombre, descripcion, precio, tiempo_min, es_extra, es
 
 INSERT INTO producto_categorias (producto_id, categoria_id) VALUES
  (1,1),(2,1),(3,2),(4,2),(5,3),(6,3),(7,1),(8,1),(9,3),(10,3),(11,3),(12,2),(13,2),(14,2),(15,2);
+
+-- fotos del menú (archivos en frontend/public/fotos). Un producto sin foto muestra un ícono.
+UPDATE productos p SET foto_url = v.u
+FROM (VALUES
+ ( 1,'/fotos/productos/pupusa-revuelta.jpg'),
+ ( 2,'/fotos/productos/pupusa-queso.jpg'),
+ ( 3,'/fotos/productos/horchata.jpg'),
+ ( 4,'/fotos/productos/cafe.jpg'),
+ ( 5,'/fotos/productos/panes-con-pollo.jpg'),
+ ( 6,'/fotos/productos/tamal-de-elote.jpg'),
+ ( 7,'/fotos/productos/pupusa-frijol-con-queso.jpg'),
+ ( 8,'/fotos/productos/pupusa-loroco.jpg'),
+ ( 9,'/fotos/productos/yuca-frita.jpg'),
+ (10,'/fotos/productos/platanos-fritos.jpg'),
+ (11,'/fotos/productos/desayuno-tipico.jpg'),
+ (12,'/fotos/productos/atol-de-elote.jpg'),
+ (13,'/fotos/productos/chocolate-caliente.jpg'),
+ (14,'/fotos/productos/agua-embotellada.jpg'),
+ (15,'/fotos/productos/gaseosa.jpg')) AS v(id, u)
+WHERE p.id = v.id;
+UPDATE sistema SET fotos_demo = TRUE WHERE id = 1;
 
 INSERT INTO recetas (producto_id, mp_id, cantidad) VALUES
  (1,1,.1),(1,2,.04),(1,3,.05),(1,4,.03),

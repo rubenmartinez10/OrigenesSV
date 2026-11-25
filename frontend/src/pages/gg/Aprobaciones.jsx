@@ -171,9 +171,13 @@ function Menus() {
   const [ver, setVer] = useState(null);
   if (!datos) return <Cargando />;
   const x = ver && datos.find((s) => s.id === ver);
+  const quitar = x?.tipo === 'Quitar del menú';
   const aprobar = async () => {
-    if (!(await confirmar({ titulo: `Agregar «${x.nombre}» al menú`, texto: `Quedará disponible en ${x.sucNombre}.`, verbo: 'Aprobar' }))) return;
-    if (await accion(() => api.post(`/gg/menus/${x.id}/aprobar`), 'Producto agregado al menú')) setVer(null);
+    const t = quitar
+      ? { titulo: `Quitar «${x.nombre}» del menú`, texto: `Deja de venderse en ${x.sucNombre} y pasa a su historial. Si hay pedidos pendientes con este producto, no se puede todavía.` }
+      : { titulo: `Agregar «${x.nombre}» al menú`, texto: `Quedará disponible en ${x.sucNombre}.` };
+    if (!(await confirmar({ ...t, verbo: 'Aprobar' }))) return;
+    if (await accion(() => api.post(`/gg/menus/${x.id}/aprobar`), quitar ? 'Producto quitado del menú' : 'Producto agregado al menú')) setVer(null);
   };
   const rechazar = async () => {
     const m = await motivo({ titulo: 'Motivo del rechazo' });
@@ -181,11 +185,11 @@ function Menus() {
   };
   return (
     <Stack>
-      {datos.length ? <Tabla cols={['Producto', 'Sucursal', 'Pide', 'Fecha']} filas={datos.map((s) => ({ onClick: () => setVer(s.id), celdas: [s.nombre, s.sucNombre, s.solicitanteNombre, fmt(s.fecha)] }))} />
-        : <Vacio ic="check">No hay solicitudes para agregar productos a un menú</Vacio>}
+      {datos.length ? <Tabla cols={['Solicitud', 'Producto', 'Sucursal', 'Pide', 'Fecha']} filas={datos.map((s) => ({ onClick: () => setVer(s.id), celdas: [s.tipo === 'Quitar del menú' ? 'Quitar' : 'Agregar', s.nombre, s.sucNombre, s.solicitanteNombre, fmt(s.fecha)] }))} />
+        : <Vacio ic="check">No hay solicitudes para agregar o quitar productos de un menú</Vacio>}
       {x && (
         <Panel show onHide={() => setVer(null)} titulo={x.nombre} estado="Solicitada" pie={[<Btn key="r" onClick={rechazar}>Rechazar</Btn>, <Btn key="a" v="p" onClick={aprobar}>Aprobar</Btn>]}>
-          <Kv pares={[['Sucursal', x.sucNombre], ['Pide', x.solicitanteNombre], ['Precio', `${$(x.precio)} IVA incluido`], ['Categorías', x.cats.join(', ') || '—']]} />
+          <Kv pares={[['Solicitud', quitar ? 'Quitar del menú' : 'Agregar al menú'], ['Sucursal', x.sucNombre], ['Pide', x.solicitanteNombre], ['Precio', `${$(x.precio)} IVA incluido`], ['Categorías', x.cats.join(', ') || '—'], ...(quitar ? [['Razón', x.motivo || '—']] : [])]} />
         </Panel>
       )}
     </Stack>

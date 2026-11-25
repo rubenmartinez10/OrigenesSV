@@ -14,7 +14,7 @@ const F = { q: '', cat: '', est: '' };
 export function FilaMenu({ x, chips, accion }) {
   return (
     <div className="tw:grid tw:items-center tw:gap-3.5 tw:px-[18px] tw:py-3 tw:border-t tw:border-bd tw:grid-cols-[48px_1fr_auto] tw:md:grid-cols-[48px_minmax(160px,1fr)_90px_minmax(120px,170px)_minmax(150px,auto)]">
-      <Foto x={{ ...x, categorias: x.categorias }} className="tw:w-12 tw:h-12 tw:rounded-xl" icono="tw:text-2xl" />
+      <Foto x={{ ...x, categorias: x.categorias }} ampliar className="tw:w-12 tw:h-12 tw:rounded-xl" icono="tw:text-2xl" />
       <div className="tw:flex tw:flex-col tw:gap-1 tw:min-w-0"><b className="tw:text-[15px]">{x.nombre}</b><div className="tw:flex tw:flex-wrap tw:gap-1">{x.categorias.map((c) => <Chip key={c} t={c} o="g" sinSimbolo />)}</div></div>
       <div className="tw:font-bold tw:text-[15px] tw:text-right">{$(x.precio)}</div>
       <div className="tw:flex tw:flex-wrap tw:gap-1.5 tw:col-span-2 tw:md:col-span-1">{chips}</div>
@@ -107,8 +107,8 @@ export default function Menu({ tab = 'mi' }) {
   const L = enMenu.filter(pasa);
   const rvN = L.filter((x) => x.revisar).length;
   const inhabilitar = (x) => clave({
-    resumen: `Inhabilitar «${x.nombre}» en tu sucursal. Deja de verse en el POS y pasa al historial. No se elimina.`, pideMotivo: true,
-    accion: (k) => api.post(`/gerente/menu/${x.id}/inhabilitar`, k), ok: 'Producto inhabilitado. Quedó en el historial',
+    resumen: `Pedir que se quite «${x.nombre}» de tu menú. Igual que para agregarlo, lo aprueba el gerente general; mientras tanto sigue a la venta. No se puede si hay pedidos pendientes con este producto.`, pideMotivo: true,
+    accion: (k) => api.post(`/gerente/menu/${x.id}/inhabilitar`, k), ok: 'Solicitud enviada al gerente general',
   });
   return (
     <Stack>
@@ -123,8 +123,8 @@ export default function Menu({ tab = 'mi' }) {
         <Bloque>
           <Cabecera />
           {L.map((x) => (
-            <FilaMenu key={x.id} x={x} chips={<Chip t={x.revisar ? 'Precio por revisar' : 'Activo'} o={x.revisar ? 'wa' : 'ok'} />}
-              accion={<>{x.revisar && <Btn v="p" onClick={() => navigate('/gerente/pedir', { state: { prod: x.id } })}>Cambiar precio</Btn>}<Btn v="red" onClick={() => inhabilitar(x)}>Inhabilitar</Btn></>} />
+            <FilaMenu key={x.id} x={x} chips={<>{x.quitar_solicitado ? <Chip t="Por quitar: esperando al gerente general" o="wa" /> : <Chip t={x.revisar ? 'Precio por revisar' : 'Activo'} o={x.revisar ? 'wa' : 'ok'} />}</>}
+              accion={<>{x.revisar && <Btn v="p" onClick={() => navigate('/gerente/pedir', { state: { prod: x.id } })}>Cambiar precio</Btn>}{!x.quitar_solicitado && <Btn v="red" onClick={() => inhabilitar(x)}>Quitar del menú</Btn>}</>} />
           ))}
         </Bloque>
       ) : enMenu.length ? <Vacio>Nada coincide con la búsqueda</Vacio> : <Stack><Vacio>Tu menú está vacío</Vacio><div><Btn v="p" onClick={() => navigate('/gerente/menu/catalogo')}>Ir al catálogo</Btn></div></Stack>}

@@ -89,6 +89,13 @@ export const ROLES = {
 };
 
 /** Pendientes de la campana: pestañas con número o, si la entrada no tiene pestañas, su contador. */
+/** Pendientes de una entrada del menú: la suma de sus pestañas (o su contador propio si no tiene pestañas con pendientes).
+ *  Es la misma cuenta que muestra la campana, así el menú lateral y la campana nunca difieren. */
+export function pendientesItem(it, pend) {
+  const t = (it.tabs || []).reduce((a, x) => a + (pend.tabs[`${it.id}/${x.id}`] || 0), 0);
+  return t || pend.menu[it.id] || 0;
+}
+
 export function pendientesDe(rol, pend) {
   const R = ROLES[rol];
   const out = [];

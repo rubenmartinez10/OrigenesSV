@@ -44,14 +44,15 @@ export default function ColaPedidos({ tab = 'nuevos' }) {
   const [asignar, setAsignar] = useState(null);
   const [cocinero, setCocinero] = useState('');
   if (!datos) return <Cargando />;
-  const { pedidos, cocineros } = datos;
+  const { pedidos, cocineros, max, sugerido } = datos;
   const de = (e) => pedidos.filter((p) => p.estado === e).sort((a, b) => a.creado - b.creado);
-  const libres = cocineros.filter((c) => !c.ocupado && !c.cola.length);
+  const libres = cocineros.filter((c) => c.carga < max);
 
   const rechazar = async (p) => {
     const m = await motivo({ titulo: `Motivo por el que se rechaza el pedido #${p.num}` });
     if (m && await accion(() => api.post(`/jefe/pedidos/${p.id}/rechazar`, { motivo: m }))) toast('Pedido rechazado. El mesero verá el motivo');
   };
+  const aceptarTodos = (l) => accion(() => api.post('/jefe/pedidos/aceptar-varios', { ids: l.map((p) => p.id) }), `${l.length} pedidos aceptados`);
   const aceptar = (p) => accion(() => api.post(`/jefe/pedidos/${p.id}/aceptar`));
   const confirmarAsignacion = async () => {
     const p = asignar;
@@ -68,13 +69,18 @@ export default function ColaPedidos({ tab = 'nuevos' }) {
   let cuerpo;
   if (tab === 'nuevos') {
     const l = de('Creado');
-    cuerpo = l.length ? tarjetas(l, (p) => <><Btn onClick={() => rechazar(p)}>Rechazar</Btn><Btn v="p" onClick={() => aceptar(p)}>Aceptar</Btn></>) : <Vacio ic="check">No hay pedidos nuevos</Vacio>;
+    cuerpo = l.length ? (
+      <Stack>
+        {l.length > 1 && <div><Btn v="p" onClick={() => aceptarTodos(l)}>Aceptar los {l.length} pedidos</Btn></div>}
+        {tarjetas(l, (p) => <><Btn onClick={() => rechazar(p)}>Rechazar</Btn><Btn v="p" onClick={() => aceptar(p)}>Aceptar</Btn></>)}
+      </Stack>
+    ) : <Vacio ic="check">No hay pedidos nuevos</Vacio>;
   } else if (tab === 'aceptados') {
     const l = de('Aceptado');
     cuerpo = (
       <Stack>
         {!cocineros.length && l.length > 0 && <Ban>No hay cocineros en turno en esta sucursal</Ban>}
-        {l.length ? tarjetas(l, (p) => <><Btn onClick={() => rechazar(p)}>Rechazar</Btn><Btn v="p" disabled={!cocineros.length} onClick={() => { setCocinero(''); setAsignar(p); }}>Asignar a cocinero</Btn></>)
+        {l.length ? tarjetas(l, (p) => <><Btn onClick={() => rechazar(p)}>Rechazar</Btn><Btn v="p" disabled={!cocineros.length} onClick={() => { setCocinero(sugerido ? String(sugerido) : ''); setAsignar(p); }}>Asignar a cocinero</Btn></>)
           : <Vacio ic="check">No hay pedidos por asignar</Vacio>}
       </Stack>
     );
@@ -94,8 +100,8 @@ export default function ColaPedidos({ tab = 'nuevos' }) {
   return (
     <Stack>
       <div className="osv-strip tw:flex tw:flex-wrap tw:items-center tw:gap-x-4 tw:gap-y-1.5 tw:px-5 tw:py-3.5 tw:rounded-[20px] tw:border tw:border-bd">
-        <span>Cocineros libres <b>{libres.length} de {cocineros.length}</b></span>
-        <small className="tw:text-tx2">{libres.map((c) => c.nombre).join(', ') || 'Todos ocupados'}</small>
+        <span>Cocineros con lugar <b>{libres.length} de {cocineros.length}</b></span>
+        <small className="tw:text-tx2">{libres.map((c) => `${c.nombre} (${c.carga}/${max})`).join(', ') || 'Todos al máximo'}</small>
       </div>
       {cuerpo}
       {ver && <PanelPedido p={ver} cat={cat} onHide={() => setVer(null)} />}
@@ -103,11 +109,11 @@ export default function ColaPedidos({ tab = 'nuevos' }) {
         {asignar && (
           <Modal.Body>
             <h3>Asignar pedido #{asignar.num}</h3>
-            <Mut>Puedes asignarlo a cualquier cocinero en turno, aunque esté ocupado: queda en su cola.</Mut>
+            <Mut>Cada cocinero prepara hasta {max} a la vez; si está al máximo, el pedido queda en su cola. Se sugiere al de menor carga.</Mut>
             <Form.Select value={cocinero} onChange={(e) => setCocinero(e.target.value)} aria-label="Cocinero">
               <option value="">Elige un cocinero</option>
               {cocineros.map((c) => (
-                <option key={c.id} value={c.id}>{c.nombre} · {c.ocupado ? `Preparando #${c.ocupado.num}` : 'Libre'}{c.cola.length ? ` · ${c.cola.length} en cola` : ''}</option>
+                <option key={c.id} value={c.id}>{c.nombre} · {c.carga}/{max} pedidos{c.id === sugerido ? ' · sugerido' : ''}</option>
               ))}
             </Form.Select>
             <div className="tw:flex tw:justify-end tw:gap-2"><Btn v="t" onClick={() => setAsignar(null)}>Cancelar</Btn><Btn v="p" disabled={!cocinero} onClick={confirmarAsignacion}>Asignar</Btn></div>

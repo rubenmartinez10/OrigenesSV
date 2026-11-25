@@ -50,6 +50,11 @@ export const Ban = ({ children, className = '' }) => (
   <div className={`tw:rounded-2xl tw:bg-[#FFF8E6] tw:border tw:border-[#F0D08A] tw:text-[#7A5200] tw:px-4 tw:py-3 ${className}`}>{children}</div>
 );
 
+/** Aviso rojo (urgente): caja abierta tarde, fuera de turno o pasada del turno. */
+export const BanRojo = ({ children, className = '' }) => (
+  <div role="alert" className={`tw:rounded-2xl tw:bg-erbg tw:border tw:border-er tw:text-er tw:px-4 tw:py-3 tw:font-semibold ${className}`}>{children}</div>
+);
+
 /* ---------- ícono circular con color según el estado ---------- */
 const FONDO = { ok: 'tw:bg-okbg tw:text-ok', wa: 'tw:bg-wabg tw:text-wa', er: 'tw:bg-erbg tw:text-er', g: 'tw:bg-gbg tw:text-tx2', in: 'tw:bg-brs tw:text-br', br: 'tw:bg-brs tw:text-br' };
 export const CirculoIcono = ({ ic, tono = 'in', className = 'tw:w-11 tw:h-11 tw:rounded-[14px]' }) => (
@@ -173,23 +178,48 @@ export const Kv = ({ pares }) => (
 
 /* ---------- tabla (Bootstrap) · cada fila es un arreglo de celdas o {celdas, onClick, tono:'rj'|'az', dim} ---------- */
 const TONO_FILA = { rj: 'tw:[&>td]:bg-[#FDF0EE]', az: 'tw:[&>td]:bg-[#EEF5FF]' };
-export const Tabla = ({ cols, filas }) => (
-  <div className="tw:overflow-x-auto tw:rounded-[20px] tw:border tw:border-bd tw:shadow-osv tw:bg-sf">
-    <Table hover className="tbl-osv">
-      <thead><tr>{cols.map((c, i) => <th key={i}>{c}</th>)}</tr></thead>
-      <tbody>
-        {filas.map((f, i) => {
-          const o = Array.isArray(f) ? { celdas: f } : f;
-          return (
-            <tr key={i} onClick={o.onClick} className={`${o.onClick ? 'tw:cursor-pointer' : ''} ${TONO_FILA[o.tono] || ''} ${o.dim ? 'tw:opacity-55' : ''}`}>
-              {o.celdas.map((c, j) => <td key={j}>{c}</td>)}
-            </tr>
-          );
-        })}
-      </tbody>
-    </Table>
-  </div>
-);
+/** Muestra de a poco (por páginas de `n`) una lista larga: evita pantallas gigantes con cientos de elementos. */
+export function useVentana(items, n = 24) {
+  const [mostrar, setMostrar] = useState(n);
+  const visibles = items.slice(0, mostrar);
+  const resto = items.length - visibles.length;
+  const mas = resto > 0 ? (
+    <div className="tw:flex tw:items-center tw:justify-center tw:gap-3 tw:py-2">
+      <Mut>Mostrando {visibles.length} de {items.length}</Mut>
+      <Btn onClick={() => setMostrar(mostrar + n)}>Ver {Math.min(n, resto)} más</Btn>
+    </div>
+  ) : null;
+  return { visibles, mas, reiniciar: () => setMostrar(n) };
+}
+
+/** Tabla: las filas con acción se pueden usar con teclado; el resaltado solo aparece si la fila hace algo; las listas largas se muestran por tandas. */
+export const Tabla = ({ cols, filas }) => {
+  const { visibles, mas } = useVentana(filas, 50);
+  const accion = visibles.some((f) => !Array.isArray(f) && f.onClick);
+  return (
+    <div className="tw:rounded-[20px] tw:border tw:border-bd tw:shadow-osv tw:bg-sf tw:overflow-hidden">
+      <div className="tw:overflow-x-auto">
+        <Table hover={accion} className="tbl-osv">
+          <thead><tr>{cols.map((c, i) => <th key={i}>{c}</th>)}</tr></thead>
+          <tbody>
+            {visibles.map((f, i) => {
+              const o = Array.isArray(f) ? { celdas: f } : f;
+              const abrir = o.onClick && ((e) => { if (!e.target.closest('button, a, input, select, textarea, label, summary')) o.onClick(e); });
+              return (
+                <tr key={i} onClick={abrir} tabIndex={o.onClick ? 0 : undefined} role={o.onClick ? 'button' : undefined}
+                  onKeyDown={o.onClick ? (e) => { if (e.key === 'Enter' && e.target === e.currentTarget) o.onClick(e); } : undefined}
+                  className={`${o.onClick ? 'tw:cursor-pointer' : ''} ${TONO_FILA[o.tono] || ''} ${o.dim ? 'tw:opacity-55' : ''}`}>
+                  {o.celdas.map((c, j) => <td key={j}>{c}</td>)}
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      </div>
+      {mas && <div className="tw:border-t tw:border-bd">{mas}</div>}
+    </div>
+  );
+};
 
 /** Nivel de stock contra el mínimo. */
 export function Nivel({ v, min }) {
@@ -218,15 +248,31 @@ export function Panel({ show, onHide, titulo, estado, ro, pie, children }) {
 
 /* ---------- foto de producto con ícono si no hay ---------- */
 const ICO_CAT = { Pupusas: '🫓', Bebidas: '🥤', Platos: '🍽️' };
-export function Foto({ x, className = '', icono = 'tw:text-5xl' }) {
+export function Foto({ x, className = '', icono = 'tw:text-5xl', ampliar = false }) {
   const [falla, setFalla] = useState(false);
-  const ico = x.extra ? '➕' : ICO_CAT[x.categorias?.[0]] || '🍴';
+  const [grande, setGrande] = useState(false);
+  const ico = x.extra ? '➕' : x.sede ? '🏪' : x.unidad ? '📦' : ICO_CAT[x.categorias?.[0]] || '🍴';
+  const hay = x.foto && !falla;
+  const abrir = ampliar && hay ? (e) => { e.stopPropagation(); setGrande(true); } : undefined;
   return (
-    <div className={`osv-foto tw:relative tw:flex tw:items-center tw:justify-center tw:overflow-hidden ${className}`}>
-      {x.foto && !falla
-        ? <img src={x.foto} alt={x.nombre} className="tw:absolute tw:inset-0 tw:w-full tw:h-full tw:object-cover" onError={() => setFalla(true)} />
-        : <span className={`${icono} tw:leading-none`} aria-hidden="true">{ico}</span>}
-    </div>
+    <>
+      <div className={`osv-foto tw:relative tw:flex tw:items-center tw:justify-center tw:overflow-hidden ${abrir ? 'tw:cursor-zoom-in' : ''} ${className}`}
+        onClick={abrir} role={abrir ? 'button' : undefined} tabIndex={abrir ? 0 : undefined} aria-label={abrir ? `Ampliar foto de ${x.nombre}` : undefined}
+        onKeyDown={abrir ? (e) => { if (e.key === 'Enter') abrir(e); } : undefined}>
+        {hay
+          ? <img src={x.foto} alt={x.nombre} className="tw:absolute tw:inset-0 tw:w-full tw:h-full tw:object-cover" onError={() => setFalla(true)} />
+          : <span className={`${icono} tw:leading-none`} aria-hidden="true">{ico}</span>}
+      </div>
+      {grande && (
+        <div className="tw:fixed tw:inset-0 tw:z-[2000] tw:bg-black/80 tw:grid tw:place-items-center tw:p-4 tw:cursor-zoom-out" onClick={(e) => { e.stopPropagation(); setGrande(false); }}
+          onKeyDown={(e) => e.key === 'Escape' && setGrande(false)} role="dialog" aria-label={`Foto de ${x.nombre}`} tabIndex={-1} ref={(el) => el?.focus()}>
+          <figure className="tw:m-0 tw:flex tw:flex-col tw:items-center tw:gap-2">
+            <img src={x.foto} alt={x.nombre} className="tw:max-w-[92vw] tw:max-h-[80vh] tw:rounded-2xl tw:object-contain" />
+            <figcaption className="tw:text-white tw:font-semibold">{x.nombre}</figcaption>
+          </figure>
+        </div>
+      )}
+    </>
   );
 }
 

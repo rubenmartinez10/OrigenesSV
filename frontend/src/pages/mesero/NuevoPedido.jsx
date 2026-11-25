@@ -10,7 +10,7 @@ import { Btn, Cargando, Chip, Foto, Lab, Mut, Panel, Pildoras, Seg, Sub, Vacio, 
 import { TicketPedido } from '../../components/Pedido.jsx';
 
 /* El borrador del pedido se conserva al cambiar de pantalla (no reserva inventario hasta enviarlo). */
-const nuevo = () => ({ lineas: [], tipo: 'Aquí', mesa: null, ref: '', cat: 'Todos' });
+const nuevo = () => ({ lineas: [], tipo: 'Aquí', mesa: null, ref: '', dir: '', tel: '', cat: 'Todos' });
 let guardado = nuevo();
 const clave = (l) => JSON.stringify([l.pr, [...l.extras].sort()]);
 
@@ -126,7 +126,8 @@ export default function NuevoPedido() {
   const cats = ['Tendencia', 'Todos', ...new Set(enMenu.flatMap((x) => x.categorias))];
   const lista = enMenu.filter((x) => B.cat === 'Todos' || (B.cat === 'Tendencia' ? tendencia.includes(x.id) : x.categorias.includes(B.cat)));
   const unit = (l) => precioCon(P[l.pr].precio, ofertas[l.pr]) + l.extras.reduce((a, e) => a + P[e].precio, 0);
-  const total = B.lineas.reduce((a, l) => a + l.cant * unit(l), 0);
+  const envio = B.tipo === 'Delivery' ? Number(config?.envio || 0) : 0;
+  const total = B.lineas.reduce((a, l) => a + l.cant * unit(l), 0) + envio;
   const libres = cat.mesas.total - Object.keys(cat.mesas.ocupadas).length;
   const mesaValida = B.mesa && !cat.mesas.ocupadas[B.mesa] ? B.mesa : null;
   const set = (cambio) => setB((b) => ({ ...b, ...cambio }));
@@ -147,10 +148,12 @@ export default function NuevoPedido() {
   };
   const enviar = () => accion(async () => {
     if (!B.ref.trim()) throw new Error('Escribe el nombre del cliente');
+    if (B.tipo === 'Delivery' && B.dir.trim().length < 10) throw new Error('Escribe la dirección de entrega completa (colonia, calle y referencia)');
+    if (B.tipo === 'Delivery' && !/^[267]\d{7}$/.test(B.tel.replace(/\s|-/g, ''))) throw new Error('Teléfono inválido: 8 dígitos que empiecen con 2, 6 o 7');
     if (B.tipo === 'Aquí' && !libres) throw new Error('Todas las mesas están ocupadas');
     if (B.tipo === 'Aquí' && !mesaValida) throw new Error('Elige la mesa del cliente');
     if (!cabe(B.lineas, P, disp)) throw new Error('No alcanzan los insumos para el pedido');
-    const p = await api.post('/mesero/pedidos', { tipo: B.tipo, mesa: B.tipo === 'Aquí' ? mesaValida : null, ref: B.ref.trim(), lineas: B.lineas });
+    const p = await api.post('/mesero/pedidos', { tipo: B.tipo, mesa: B.tipo === 'Aquí' ? mesaValida : null, ref: B.ref.trim(), lineas: B.lineas, direccion: B.dir, telefono: B.tel });
     setB(nuevo());
     setTicket(p);
   });
@@ -198,6 +201,13 @@ export default function NuevoPedido() {
             <h3 className="tw:text-[17px] tw:m-0">Pedido en curso</h3>
             <Seg opciones={['Aquí', 'Llevar', 'Delivery']} valor={B.tipo} onChange={(t) => set({ tipo: t })} min={80} />
             <Form.Control placeholder="Nombre del cliente" value={B.ref} onChange={(e) => set({ ref: e.target.value })} aria-label="Nombre del cliente" />
+            {B.tipo === 'Delivery' && (
+              <>
+                <Form.Control as="textarea" rows={2} placeholder="Dirección de entrega (colonia, calle, referencia)" value={B.dir} onChange={(e) => set({ dir: e.target.value })} aria-label="Dirección de entrega" />
+                <Form.Control type="tel" inputMode="numeric" placeholder="Teléfono (8 dígitos)" value={B.tel} onChange={(e) => set({ tel: e.target.value })} aria-label="Teléfono del cliente" />
+                <Mut>Cargo de envío: {$(envio)} (incluido en el total)</Mut>
+              </>
+            )}
             {B.tipo === 'Aquí' && <SelectorMesa mesas={cat.mesas} valor={mesaValida} onChange={(m) => set({ mesa: m })} />}
             <div className="tw:flex tw:flex-col tw:gap-2.5 tw:overflow-auto tw:min-h-24 tw:flex-1">
               {B.lineas.map((l, i) => {

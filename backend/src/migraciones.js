@@ -8,6 +8,16 @@ import { q } from './db.js';
 const PASOS = [
   // reloj que se pausa cuando nadie usa la app
   'ALTER TABLE sistema ADD COLUMN IF NOT EXISTS pausado BOOLEAN NOT NULL DEFAULT FALSE',
+  'ALTER TABLE sucursales ADD COLUMN IF NOT EXISTS foto_url TEXT',
+  'ALTER TABLE configuracion ADD COLUMN IF NOT EXISTS cocina_simultaneos SMALLINT NOT NULL DEFAULT 3',
+  'ALTER TABLE configuracion ADD COLUMN IF NOT EXISTS envio_delivery NUMERIC(6,2) NOT NULL DEFAULT 2.00',
+  'ALTER TABLE configuracion ADD COLUMN IF NOT EXISTS ganancia_min_pct SMALLINT NOT NULL DEFAULT 30',
+  'ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS direccion TEXT',
+  'ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS telefono VARCHAR(12)',
+  'ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS envio NUMERIC(10,2) NOT NULL DEFAULT 0',
+  'ALTER TABLE ventas ADD COLUMN IF NOT EXISTS codigo_generacion VARCHAR(36)',
+  'ALTER TABLE ventas ADD COLUMN IF NOT EXISTS sello VARCHAR(40)',
+  'ALTER TABLE ventas ADD COLUMN IF NOT EXISTS estrellas SMALLINT CHECK (estrellas BETWEEN 1 AND 5)',
   `CREATE OR REPLACE FUNCTION ahora() RETURNS TIMESTAMPTZ LANGUAGE sql STABLE AS $$
      SELECT CASE WHEN pausado THEN reloj_base ELSE reloj_base + (now() - real_base) END FROM sistema WHERE id = 1
    $$`,
@@ -56,6 +66,44 @@ const PASOS = [
   // nómina: base para renta de cada pago y fecha de envío del reporte
   'ALTER TABLE planilla_filas ADD COLUMN IF NOT EXISTS base NUMERIC(10,2) NOT NULL DEFAULT 0',
   'ALTER TABLE reportes_pago ADD COLUMN IF NOT EXISTS enviado TIMESTAMPTZ',
+  // cobro al retirarse el cliente, caja ligada al turno (apertura tarde / fuera de turno / pasada del turno) y avisos en rojo
+  'ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cuenta_pedida TIMESTAMPTZ',
+  'ALTER TABLE cajas ADD COLUMN IF NOT EXISTS tarde_min INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE cajas ADD COLUMN IF NOT EXISTS fuera_turno BOOLEAN NOT NULL DEFAULT FALSE',
+  'ALTER TABLE cajas ADD COLUMN IF NOT EXISTS turno_fin TIMESTAMPTZ',
+  'ALTER TABLE cajas ADD COLUMN IF NOT EXISTS aviso_fin BOOLEAN NOT NULL DEFAULT FALSE',
+  'ALTER TABLE notificaciones ADD COLUMN IF NOT EXISTS rojo BOOLEAN NOT NULL DEFAULT FALSE',
+  'ALTER TABLE solicitudes DROP CONSTRAINT IF EXISTS solicitudes_tipo_check',
+  `ALTER TABLE solicitudes ADD CONSTRAINT solicitudes_tipo_check CHECK (tipo IN (
+     'Restablecer contraseña','Cancelación','Reposición','Devolución','Producto nuevo','Extra nuevo','Categoría nueva','Materia sin proveedor',
+     'Cambio de precio','Agregar al menú','Quitar del menú','Inhabilitar materia prima','Unidad nueva','Categoría de materia prima','Personal','Salario','Despido','Renuncia','Apertura de caja'))`,
+  // sucursal cerrada: su personal queda pendiente de reubicación; un correo y un DUI pertenecen a una sola persona
+  'ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS reubicacion_desde TIMESTAMPTZ',
+  // quien presenta su renuncia y se le acepta queda como «Renunció» (sin acceso, con su historial)
+  'ALTER TABLE usuarios DROP CONSTRAINT IF EXISTS usuarios_estado_check',
+  `ALTER TABLE usuarios ADD CONSTRAINT usuarios_estado_check CHECK (estado IN ('Activo','Despedido','Renunció','Inhabilitado'))`,
+  'CREATE UNIQUE INDEX IF NOT EXISTS usuarios_correo_unico ON usuarios (lower(correo)) WHERE correo IS NOT NULL',
+  'CREATE UNIQUE INDEX IF NOT EXISTS usuarios_documento_unico ON usuarios (documento) WHERE documento IS NOT NULL',
+  // fotos de la demo (frontend/public/fotos): se asignan una sola vez y solo a lo que no tiene foto, así quitar una no la vuelve a poner
+  'ALTER TABLE sistema ADD COLUMN IF NOT EXISTS fotos_demo BOOLEAN NOT NULL DEFAULT FALSE',
+  `DO $$ BEGIN
+     IF NOT COALESCE((SELECT fotos_demo FROM sistema WHERE id = 1), TRUE) THEN
+       UPDATE productos p SET foto_url = v.u FROM (VALUES
+         (1,'/fotos/productos/pupusa-revuelta.jpg'),(2,'/fotos/productos/pupusa-queso.jpg'),(3,'/fotos/productos/horchata.jpg'),
+         (4,'/fotos/productos/cafe.jpg'),(5,'/fotos/productos/panes-con-pollo.jpg'),(6,'/fotos/productos/tamal-de-elote.jpg'),
+         (7,'/fotos/productos/pupusa-frijol-con-queso.jpg'),(8,'/fotos/productos/pupusa-loroco.jpg'),(9,'/fotos/productos/yuca-frita.jpg'),
+         (10,'/fotos/productos/platanos-fritos.jpg'),(11,'/fotos/productos/desayuno-tipico.jpg'),(12,'/fotos/productos/atol-de-elote.jpg'),
+         (13,'/fotos/productos/chocolate-caliente.jpg'),(14,'/fotos/productos/agua-embotellada.jpg'),(15,'/fotos/productos/gaseosa.jpg')
+       ) AS v(id, u) WHERE p.id = v.id AND p.foto_url IS NULL;
+       UPDATE sucursales s SET foto_url = v.u FROM (VALUES (1,'/fotos/sucursales/centro.jpg'),(2,'/fotos/sucursales/escalon.jpg')) AS v(id, u)
+         WHERE s.id = v.id AND s.foto_url IS NULL;
+       UPDATE sistema SET fotos_demo = TRUE WHERE id = 1;
+     END IF;
+   END $$`,
+  // cancelar un pedido ya iniciado en cocina: el cliente paga los insumos usados
+  'ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cargo_cancel NUMERIC(10,2) NOT NULL DEFAULT 0',
+  // los despidos ya no los aprueba el gerente de sucursal: los pendientes pasan al gerente general
+  `UPDATE solicitudes SET aprueba_rol = 'gg' WHERE tipo = 'Despido' AND estado = 'Solicitada' AND aprueba_rol = 'gerente'`,
 ];
 
 export async function migrar() {

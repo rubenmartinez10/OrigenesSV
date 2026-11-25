@@ -6,7 +6,7 @@ import { leerFoto } from '../lib/fotos.js';
 import { useDatos, useSesion } from '../context/Sesion.jsx';
 import { useDialogos } from '../context/Dialogos.jsx';
 import { Icono } from './Icono.jsx';
-import { Avatar, Btn, Campo, Card, Cargando, Chip, Err, Kv, Mut, Panel, Pildoras, Stack, Tabla, Vacio } from './ui.jsx';
+import { Avatar, Btn, Campo, Card, Cargando, Chip, Err, Kv, Mut, Panel, Pildoras, Stack, Tabla, Vacio, useVentana } from './ui.jsx';
 
 /* Piezas que comparten Recursos Humanos, el gerente general y el director. */
 const norm = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
@@ -260,5 +260,79 @@ export function DetalleFactura({ id, onHide, pie }) {
         <Kv pares={[['Subtotal', $(f.subtotal)], ['Transporte', $(f.transporte)]]} />
       </> : <Mut>Esta factura es de un registro anterior y no trae detalle por materia prima.</Mut>}
     </Panel>
+  );
+}
+
+/* ---------- sucursales: filtros, orden y valoración de clientes ---------- */
+/** Cambiar el nombre y la dirección de una sucursal (gerente general y director). */
+export function EditarSucursal({ s, onHide }) {
+  const { accion } = useDialogos();
+  const [E, setE] = useState({ nombre: s.nombre, dir: s.direccion || '' });
+  const nom = E.nombre.trim().replace(/\s+/g, ' ');
+  const dir = E.dir.trim().replace(/\s+/g, ' ');
+  const ok = nom.length >= 3 && dir.length >= 8 && (nom !== s.nombre || dir !== (s.direccion || ''));
+  const guardar = async () => {
+    if (await accion(() => api.put(`/franquicia/sucursales/${s.id}/datos`, { nombre: nom, direccion: dir }), 'Datos de la sucursal actualizados')) onHide();
+  };
+  return (
+    <Panel show onHide={onHide} titulo="Editar sucursal"
+      pie={[<Btn key="c" v="t" onClick={onHide}>Cancelar</Btn>, <Btn key="g" v="p" disabled={!ok} onClick={guardar}>Guardar</Btn>]}>
+      <Campo l="Nombre (3 a 60 caracteres, distinto al de las demás)"><Form.Control maxLength={60} value={E.nombre} onChange={(e) => setE({ ...E, nombre: e.target.value })} /></Campo>
+      <Campo l="Dirección del local (8 a 160 caracteres)"><Form.Control maxLength={160} value={E.dir} placeholder="Calle, número y punto de referencia" onChange={(e) => setE({ ...E, dir: e.target.value })} /></Campo>
+      <Mut>La zona y el tamaño no cambian: fijan el costo y la plantilla. El cambio queda en la bitácora con el nombre y la dirección anteriores.</Mut>
+    </Panel>
+  );
+}
+
+export const Estrellas = ({ n }) => (
+  <span aria-label={`${n} de 5`} className="tw:text-[#E0A42E] tw:tracking-wider">{'★'.repeat(Math.round(n))}<span className="tw:text-[#D5DCE8]">{'★'.repeat(5 - Math.round(n))}</span></span>
+);
+/** Valoración de una sucursal para mostrar en su tarjeta. */
+export const Valoracion = ({ s }) => (s.votos
+  ? <div className="tw:flex tw:items-center tw:gap-1.5"><Estrellas n={s.prom} /><b>{s.prom.toFixed(1)}</b><Mut>{s.votos} valoraciones</Mut></div>
+  : <Mut>Sin valoraciones todavía</Mut>);
+
+const norm2 = (x) => String(x ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const ORDENES = {
+  puntuacion: ['Mejor puntuación', (a, b) => (b.puntaje ?? -1) - (a.puntaje ?? -1) || a.nombre.localeCompare(b.nombre)],
+  peor: ['Peor puntuación', (a, b) => (a.puntaje ?? 99) - (b.puntaje ?? 99) || a.nombre.localeCompare(b.nombre)],
+  nombre: ['Nombre (A-Z)', (a, b) => a.nombre.localeCompare(b.nombre)],
+  votos: ['Más valoraciones', (a, b) => b.votos - a.votos || a.nombre.localeCompare(b.nombre)],
+  ingresos: ['Mayores ingresos', (a, b) => (b.ingresos ?? 0) - (a.ingresos ?? 0) || a.nombre.localeCompare(b.nombre)],
+};
+const MINIMOS = { '': 'Cualquier puntuación', 4: '4 ★ o más', 3: '3 ★ o más', sin: 'Sin valoraciones' };
+const FS = { q: '', zona: '', estado: '', min: '', orden: 'puntuacion' };
+
+/** Lista de sucursales con búsqueda, filtros (zona, estado, puntuación) y orden; se muestra por tandas para que aguante muchas. */
+export function ListaSucursales({ items, render, conIngresos = false }) {
+  const [f, setF] = useState(FS);
+  const zonas = [...new Set(items.map((x) => x.zona))].sort();
+  const estados = [...new Set(items.map((x) => x.estado))];
+  const L = items.filter((x) => (!f.q.trim() || norm2(`${x.nombre} ${x.zona}`).includes(norm2(f.q)))
+    && (!f.zona || x.zona === f.zona) && (!f.estado || x.estado === f.estado)
+    && (f.min === '' || (f.min === 'sin' ? !x.votos : x.votos && x.prom >= Number(f.min))))
+    .sort(ORDENES[f.orden][1]);
+  const { visibles, mas } = useVentana(L, 12);
+  const activo = f.q || f.zona || f.estado || f.min !== '';
+  const sel = (k, opciones, etiqueta) => (
+    <Form.Select value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} className="tw:max-w-[210px]" aria-label={etiqueta}>
+      {opciones.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
+    </Form.Select>
+  );
+  return (
+    <div className="tw:flex tw:flex-col tw:gap-3">
+      <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-2">
+        <Form.Control type="search" placeholder="Buscar por nombre o zona" value={f.q} onChange={(e) => setF({ ...f, q: e.target.value })} className="tw:max-w-[280px]" aria-label="Buscar sucursal" />
+        {zonas.length > 1 && sel('zona', [['', 'Todas las zonas'], ...zonas.map((z) => [z, z])], 'Zona')}
+        {estados.length > 1 && sel('estado', [['', 'Todos los estados'], ...estados.map((e) => [e, e])], 'Estado')}
+        {sel('min', Object.entries(MINIMOS), 'Puntuación')}
+        {sel('orden', Object.entries(ORDENES).filter(([k]) => conIngresos || k !== 'ingresos').map(([k, [t]]) => [k, t]), 'Ordenar por')}
+        {activo && <Btn v="t" onClick={() => setF({ ...FS, orden: f.orden })}>Limpiar filtros</Btn>}
+      </div>
+      <Mut>{L.length === items.length ? `${items.length} sucursales` : `${L.length} de ${items.length} sucursales`}</Mut>
+      <div className="tw:grid tw:gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(330px, 100%), 1fr))' }}>{visibles.map(render)}</div>
+      {!L.length && <Vacio ic="search">Ninguna sucursal coincide con esos filtros</Vacio>}
+      {mas}
+    </div>
   );
 }

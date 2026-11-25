@@ -5,7 +5,7 @@ import { useDatos } from '../../context/Sesion.jsx';
 import { Btn, Cargando, Chip, Kv, Mut, Panel, Stack, Tabla, Vacio } from '../../components/ui.jsx';
 
 /* Director · 8.6 Bitácora (solo lectura): toda acción queda registrada con usuario, fecha y motivo */
-const S = { q: '', rol: '', suc: '', n: 10 };
+const S = { q: '', rol: '', suc: '', desde: '', hasta: '', n: 10 };
 const j = (o) => (o == null ? '—' : typeof o === 'object' ? JSON.stringify(o) : String(o));
 
 export default function Bitacora() {
@@ -13,7 +13,7 @@ export default function Bitacora() {
   const setF = (x) => { Object.assign(S, x); setFS({ ...S }); };
   const [q, setQ] = useState(f.q);
   useEffect(() => { const t = setTimeout(() => { if (q !== S.q) setF({ q, n: 10 }); }, 300); return () => clearTimeout(t); }, [q]); // eslint-disable-line react-hooks/exhaustive-deps
-  const { datos } = useDatos(`/director/bitacora?n=${f.n}&q=${encodeURIComponent(f.q)}&rol=${f.rol}&suc=${f.suc}`);
+  const { datos } = useDatos(`/director/bitacora?n=${f.n}&q=${encodeURIComponent(f.q)}&rol=${f.rol}&suc=${f.suc}&desde=${f.desde}&hasta=${f.hasta}`);
   const [ver, setVer] = useState(null);
   if (!datos) return <Cargando />;
   const b = ver && datos.registros.find((x) => x.id === ver);
@@ -28,6 +28,13 @@ export default function Bitacora() {
         <Form.Select value={f.suc} onChange={(e) => setF({ suc: e.target.value, n: 10 })} className="tw:max-w-[200px]" aria-label="Sucursal">
           <option value="">Todas las sucursales</option>{datos.sucursales.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
         </Form.Select>
+        <label className="tw:flex tw:items-center tw:gap-1.5 tw:text-tx2 tw:text-sm">Desde
+          <Form.Control type="date" value={f.desde} max={f.hasta || undefined} onChange={(e) => setF({ desde: e.target.value, n: 10 })} className="tw:max-w-[160px]" />
+        </label>
+        <label className="tw:flex tw:items-center tw:gap-1.5 tw:text-tx2 tw:text-sm">Hasta
+          <Form.Control type="date" value={f.hasta} min={f.desde || undefined} onChange={(e) => setF({ hasta: e.target.value, n: 10 })} className="tw:max-w-[160px]" />
+        </label>
+        {(f.q || f.rol || f.suc || f.desde || f.hasta) && <Btn v="t" onClick={() => { setQ(''); setF({ ...S, q: '', rol: '', suc: '', desde: '', hasta: '', n: 10 }); }}>Limpiar filtros</Btn>}
       </div>
       {datos.registros.length ? <Tabla cols={['Fecha', 'Usuario', 'Acción', 'Elemento', 'Sucursal']} filas={datos.registros.map((x) => ({
         onClick: () => setVer(x.id), celdas: [fmt(x.fecha), x.usuario, <span>{x.accion}{x.clave && <> <Chip t="Con clave" o="in" sinSimbolo /></>}</span>, x.elemento || '—', x.sucNombre || '—'],

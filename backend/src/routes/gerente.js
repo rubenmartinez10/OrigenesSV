@@ -2,16 +2,18 @@ import { Router } from 'express';
 import { q, tx, ts } from '../db.js';
 import { fallo, si, noEncontrado, motivo as validarMotivo } from '../lib/errores.js';
 import { ahora, D, inicioDia } from '../lib/reloj.js';
+import { creditoFactura } from '../lib/procesos.js';
 import { bitacora, notificar } from '../lib/registro.js';
 import { verificarClave } from '../lib/clave.js';
-import { cfg, r2, sum, recetas, costosMP, costosTope, costoReceta, costoPropuesta, neto, turnosDe } from '../lib/negocio.js';
+import { cfg, r2, sum, recetas, costosMP, costosTope, costoReceta, costoPropuesta, neto, bajoMargen, msgMargen, turnosDe, textoTurno, revisarCajasPasadas, pedidosPendientesCon, msgPendientes } from '../lib/negocio.js';
 import { minimosYStock } from '../lib/procesos.js';
 import { cargarCompras, compraParaCambiar, aceptarMercancia, valorRecibido, skuNuevo } from '../lib/compras.js';
 import { cargarSolicitudes, cargarVentas } from '../lib/consultas.js';
 import { cargarConteos } from './bodega.js';
+import { tendencia } from '../lib/panel.js';
 import {
-  ROLN, ROLES_SUC, salarioRol, salarioDe, activos, necesarios, aplicarDespido, despidoBloqueo, usuarioPorId,
-  cambiarRol, despedirDirecto, puedeSobre, rolesDestino, turnoHoy,
+  ROLN, ROLES_SUC, salarioRol, salarioDe, activos, necesarios, usuarioPorId,
+  cambiarRol, solicitarDespido, indemnizacionDe, puedeSobre, rolesDestino, turnoHoy,
 } from '../lib/personal.js';
 
 /* Gerente de sucursal · interfaces 5.1 a 5.12 */
@@ -60,6 +62,10 @@ r.get('/resumen', async (req, res) => {
   });
 });
 
+r.get('/tendencia', async (req, res) => {
+  res.json(await tendencia(DB, req.usuario.sucursal, String(req.query.per || 'Hoy')));
+});
+
 /* ---------- 5.2 propuestas de productos, extras y categorías ---------- */
 r.get('/propuestas', async (req, res) => {
   const s = req.usuario.sucursal;
@@ -85,7 +91,7 @@ r.post('/propuestas/:id/aprobar', async (req, res) => {
       si(!(precio > 0), 'Escribe el precio propuesto');
       const k = await cfg(c);
       const cp = await costoPropuesta(c, x.datos.ings, u.sucursal);
-      si(!cp.incompleto && neto(precio, k) <= cp.costo, 'Sin IVA, el precio debe superar el costo');
+      si(!cp.incompleto && bajoMargen(precio, cp.costo, k), msgMargen(cp.costo, k));
     }
     if (x.tipo !== 'Categoría nueva') {
       const { rows: ps } = await c.query('SELECT nombre FROM productos');
@@ -183,23 +189,29 @@ r.post('/compras/:id/devolver', async (req, res) => {
   res.json({ ok: true });
 });
 
+/** Reclamo al proveedor por mercancía con problemas: no pasa por el gerente general. El proveedor compensa según su política
+ *  (descuento o reembolso): baja la factura si aún no se paga, o queda saldo a favor si ya se pagó. */
 r.post('/compras/:id/descuento', async (req, res) => {
   const u = req.usuario;
-  const tipo = req.body?.tipo === 'Reembolso' ? 'Reembolso' : 'Descuento';
   const monto = r2(+req.body?.monto);
   const m = validarMotivo(req.body?.motivo);
-  await tx(async (c) => {
+  const out = await tx(async (c) => {
     const cp = await compraParaCambiar(c, req.params.id, u.sucursal);
     si(cp.estado !== 'Recibida', 'Esta mercancía ya fue decidida');
     const max = r2((await valorRecibido(c, cp.id)) + (cp.transporte || 0));
     si(!(monto > 0), 'Escribe el monto');
     si(monto > max, `El monto no puede superar $${max.toFixed(2)}`);
-    await c.query(`UPDATE compras SET estado = 'Descuento en revisión', detalle = detalle || $2::jsonb WHERE id = $1`,
-      [cp.id, JSON.stringify({ solDescuento: { tipo, monto, motivo: m, por: u.id, fecha: ahora() } })]);
-    await notificar(c, 'gg', null, `Solicitud de ${tipo.toLowerCase()} por revisar`, `Compra #${cp.id} · $${monto.toFixed(2)}`);
-    await bitacora(c, u, { accion: 'compra.solicitar_descuento', elemento: `Compra #${cp.id}`, motivo: m, despues: { tipo, monto } });
+    const { rows: pv } = await c.query('SELECT nombre, politica_tipo FROM proveedores WHERE id = $1', [cp.proveedor_id]);
+    const tipo = pv[0].politica_tipo === 'Descuento' ? 'Descuento' : 'Reembolso';
+    const d = cp.detalle || {};
+    if (cp.factura_id) await creditoFactura(c, cp.factura_id, cp.proveedor_id, tipo, monto, m);
+    await c.query(`UPDATE compras SET detalle = detalle || $2::jsonb WHERE id = $1`,
+      [cp.id, JSON.stringify({ solDescuentoRes: { tipo, estado: 'Aplicado por el proveedor', monto, motivo: m, fecha: ahora() }, descuentoAplicado: r2((d.descuentoAplicado || 0) + monto) })]);
+    await notificar(c, 'bodega', u.sucursal, `${tipo} del proveedor aplicado`, `${pv[0].nombre} · $${monto.toFixed(2)}`);
+    await bitacora(c, u, { accion: 'compra.solicitar_descuento', elemento: `Compra #${cp.id}`, motivo: m, despues: { tipo, monto, por: 'proveedor' } });
+    return { tipo, monto, proveedor: pv[0].nombre };
   });
-  res.json({ ok: true });
+  res.json({ ok: true, ...out });
 });
 
 r.post('/compras/:id/cancelar', async (req, res) => {
@@ -262,18 +274,47 @@ r.post('/ofertas/:id/rechazar', async (req, res) => {
 });
 
 /* ---------- 5.7 cierres de caja ---------- */
+const cajaGerente = (k) => ({
+  id: k.id, mesero: k.mesero_id, meseroNombre: k.mesero_nombre, fondo: k.fondo, estado: k.estado, abierta: k.abierta, cerrada: k.cerrada,
+  declarado: k.declarado, esp: { Efectivo: k.esp_efectivo, Tarjeta: k.esp_tarjeta, Bitcoin: k.esp_bitcoin }, comentario: k.comentario,
+  tardeMin: k.tarde_min, fueraTurno: k.fuera_turno, turnoFin: k.turno_fin,
+  pasadaMin: k.turno_fin && k.estado === 'Abierta' && ahora() > k.turno_fin ? Math.round((ahora() - k.turno_fin) / 60e3) : 0,
+});
+/** vista: pend (cierres por aprobar) · hist · abiertas (cajas que están abiertas ahora) */
 r.get('/cajas', async (req, res) => {
   const s = req.usuario.sucursal;
-  const pend = req.query.vista !== 'hist';
+  await tx((c) => revisarCajasPasadas(c, s));
+  const estados = { abiertas: ['Abierta'], hist: ['Aprobada', 'Observada'] }[req.query.vista] || ['Pendiente de aprobación'];
   const { rows } = await q(
     `SELECT k.*, u.nombre AS mesero_nombre FROM cajas k JOIN usuarios u ON u.id = k.mesero_id
-      WHERE k.sucursal_id = $1 AND k.estado = ANY($2) ORDER BY k.cerrada DESC NULLS LAST LIMIT 40`,
-    [s, pend ? ['Pendiente de aprobación'] : ['Aprobada', 'Observada']]);
-  res.json(rows.map((k) => ({
-    id: k.id, mesero: k.mesero_id, meseroNombre: k.mesero_nombre, fondo: k.fondo, estado: k.estado, abierta: k.abierta, cerrada: k.cerrada,
-    declarado: k.declarado, esp: { Efectivo: k.esp_efectivo, Tarjeta: k.esp_tarjeta, Bitcoin: k.esp_bitcoin }, comentario: k.comentario,
-  })));
+      WHERE k.sucursal_id = $1 AND k.estado = ANY($2) ORDER BY COALESCE(k.cerrada, k.abierta) DESC LIMIT 40`, [s, estados]);
+  res.json(rows.map(cajaGerente));
 });
+
+/** Solicitudes de apertura de caja fuera de turno. */
+r.get('/aperturas', async (req, res) => {
+  const { rows } = await q(
+    `SELECT x.id, x.estado, x.motivo, x.fecha, x.rechazo, u.nombre AS mesero_nombre, u.id AS mesero_id
+       FROM solicitudes x JOIN usuarios u ON u.id = x.solicitante_id
+      WHERE x.tipo = 'Apertura de caja' AND x.sucursal_id = $1 AND (x.estado = 'Solicitada' OR x.fecha > $2) ORDER BY x.estado = 'Solicitada' DESC, x.id DESC LIMIT 30`,
+    [req.usuario.sucursal, ts(ahora() - 7 * D)]);
+  const tu = await turnosDe({ query: q }, rows.map((x) => x.mesero_id));
+  res.json(rows.map((x) => ({ id: x.id, estado: x.estado, motivo: x.motivo, fecha: x.fecha, rechazo: x.rechazo, meseroNombre: x.mesero_nombre, turno: textoTurno(tu[x.mesero_id]) })));
+});
+async function decidirApertura(req, estado, m) {
+  const u = req.usuario;
+  await tx(async (c) => {
+    const { rows } = await c.query(
+      `UPDATE solicitudes SET estado = $3, decidio_id = $4, rechazo = $5 WHERE id = $1 AND sucursal_id = $2 AND tipo = 'Apertura de caja' AND estado = 'Solicitada' RETURNING solicitante_id`,
+      [req.params.id, u.sucursal, estado, u.id, m ? JSON.stringify({ por: u.nombre, etapa: 'gerente', motivo: m, fecha: ahora() }) : null]);
+    si(!rows[0], 'Esta solicitud ya fue decidida');
+    await c.query(`INSERT INTO notificaciones (rol_id, sucursal_id, titulo, detalle, fecha) VALUES ('mesero',$1,$2,$3,$4)`,
+      [u.sucursal, estado === 'Aprobada' ? 'Apertura autorizada' : 'Apertura rechazada', estado === 'Aprobada' ? 'Ya puedes abrir tu caja' : m, ts(ahora())]);
+    await bitacora(c, u, { accion: estado === 'Aprobada' ? 'caja.apertura.aprobar' : 'caja.apertura.rechazar', elemento: `Solicitud ${req.params.id}`, motivo: m || '' });
+  });
+}
+r.post('/aperturas/:id/aprobar', async (req, res) => { await decidirApertura(req, 'Aprobada', null); res.json({ ok: true }); });
+r.post('/aperturas/:id/rechazar', async (req, res) => { await decidirApertura(req, 'Rechazada', validarMotivo(req.body?.motivo)); res.json({ ok: true }); });
 
 r.get('/cajas/:id/ventas', async (req, res) => {
   res.json(await cargarVentas(DB, 'v.caja_id = $1 AND v.sucursal_id = $2', [req.params.id, req.usuario.sucursal]));
@@ -357,10 +398,10 @@ r.post('/conteos/:id/rechazar', async (req, res) => {
 });
 
 /* ---------- 5.10 solicitudes del equipo: inhabilitación, catálogo de MP y despidos ---------- */
-const TIPOS_EQUIPO = ['Inhabilitar materia prima', 'Unidad nueva', 'Categoría de materia prima', 'Despido'];
+const TIPOS_EQUIPO = ['Inhabilitar materia prima', 'Unidad nueva', 'Categoría de materia prima'];
 r.get('/solicitudes', async (req, res) => {
   res.json(await cargarSolicitudes(DB,
-    `s.sucursal_id = $1 AND s.estado = 'Solicitada' AND s.tipo = ANY($2) AND (s.tipo <> 'Despido' OR s.aprueba_rol = 'gerente')`, [req.usuario.sucursal, TIPOS_EQUIPO], 's.fecha'));
+    `s.sucursal_id = $1 AND s.estado = 'Solicitada' AND s.tipo = ANY($2)`, [req.usuario.sucursal, TIPOS_EQUIPO], 's.fecha'));
 });
 
 r.post('/solicitudes/:id/aprobar', async (req, res) => {
@@ -370,19 +411,12 @@ r.post('/solicitudes/:id/aprobar', async (req, res) => {
   const x0 = pre[0];
   si(!x0, 'Esta solicitud ya fue decidida');
   si(x0.solicitante_id === u.id, 'No puedes aprobar tus propias solicitudes');
-  if (x0.tipo === 'Despido') {
-    const bl = await despidoBloqueo(DB, await usuarioPorId(DB, x0.usuario_id));
-    si(bl, bl);
-  }
   await verificarClave(u, req.body?.clave);
   await tx(async (c) => {
     const { rows } = await c.query('SELECT * FROM solicitudes WHERE id = $1 AND estado = \'Solicitada\' FOR UPDATE', [x0.id]);
     const x = rows[0];
     si(!x, 'Esta solicitud ya fue decidida');
-    if (x.tipo === 'Despido') {
-      await aplicarDespido(c, x.id, u);
-      await bitacora(c, u, { accion: 'despido.aprobar', elemento: x.nombre || `Usuario ${x.usuario_id}`, motivo: x.motivo, clave: true });
-    } else if (x.tipo === 'Inhabilitar materia prima') {
+    if (x.tipo === 'Inhabilitar materia prima') {
       await c.query(`INSERT INTO sucursal_mp_inhabilitada (sucursal_id, mp_id, fecha, solicitud_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, [s, x.mp_id, ts(ahora()), x.id]);
       await c.query(`UPDATE solicitudes SET estado = 'Aplicada', decidio_id = $2, cierre = $3 WHERE id = $1`, [x.id, u.id, ts(ahora())]);
       await notificar(c, 'bodega', s, 'Inhabilitación aprobada', x.nombre);
@@ -406,7 +440,7 @@ r.post('/solicitudes/:id/rechazar', async (req, res) => {
                                     WHERE id = $1 AND sucursal_id = $2 AND estado = 'Solicitada' AND tipo = ANY($6) RETURNING tipo`,
     [req.params.id, u.sucursal, JSON.stringify({ por: u.nombre, motivo: m }), u.id, ts(ahora()), TIPOS_EQUIPO]);
     si(!rows[0], 'Esta solicitud ya fue decidida');
-    await notificar(c, rows[0].tipo === 'Despido' ? 'rrhh' : 'bodega', rows[0].tipo === 'Despido' ? null : u.sucursal, 'Solicitud rechazada', m);
+    await notificar(c, 'bodega', u.sucursal, 'Solicitud rechazada', m);
     await bitacora(c, u, { accion: 'solicitud.rechazar', elemento: `Solicitud ${req.params.id}`, motivo: m });
   });
   res.json({ ok: true });
@@ -430,24 +464,34 @@ r.get('/menu', async (req, res) => {
             ARRAY(SELECT cg.nombre FROM producto_categorias pc JOIN categorias cg ON cg.id = pc.categoria_id WHERE pc.producto_id = p.id ORDER BY cg.id) AS categorias,
             EXISTS (SELECT 1 FROM sucursal_menu sm WHERE sm.sucursal_id = $1 AND sm.producto_id = p.id) AS en_menu,
             EXISTS (SELECT 1 FROM sucursal_revisar sr WHERE sr.sucursal_id = $1 AND sr.producto_id = p.id) AS revisar,
-            EXISTS (SELECT 1 FROM solicitudes x WHERE x.tipo = 'Agregar al menú' AND x.producto_id = p.id AND x.sucursal_id = $1 AND x.estado = 'Solicitada') AS solicitado
+            EXISTS (SELECT 1 FROM solicitudes x WHERE x.tipo = 'Agregar al menú' AND x.producto_id = p.id AND x.sucursal_id = $1 AND x.estado = 'Solicitada') AS solicitado,
+            EXISTS (SELECT 1 FROM solicitudes x WHERE x.tipo = 'Quitar del menú' AND x.producto_id = p.id AND x.sucursal_id = $1 AND x.estado = 'Solicitada') AS quitar_solicitado
        FROM productos p WHERE NOT p.es_extra AND p.estado <> 'Eliminado' ORDER BY p.id`, [s]);
   const { rows: hist } = await q(
     `SELECT h.*, p.nombre FROM menu_historial h JOIN productos p ON p.id = h.producto_id WHERE h.sucursal_id = $1 ORDER BY h.fecha DESC`, [s]);
   res.json({ productos: rows, historial: hist, ahora: ahora() });
 });
 
+/** Quitar un producto del menú de la sucursal: igual que agregarlo, lo aprueba el gerente general.
+ *  No se puede si hay pedidos pendientes con ese producto. */
 r.post('/menu/:id/inhabilitar', async (req, res) => {
   const u = req.usuario;
   const m = validarMotivo(req.body?.motivo, 'La razón');
   await verificarClave(u, req.body?.clave);
   await tx(async (c) => {
-    const { rows } = await c.query('DELETE FROM sucursal_menu WHERE sucursal_id = $1 AND producto_id = $2 RETURNING producto_id', [u.sucursal, req.params.id]);
+    const { rows } = await c.query(
+      `SELECT p.nombre FROM sucursal_menu sm JOIN productos p ON p.id = sm.producto_id WHERE sm.sucursal_id = $1 AND sm.producto_id = $2`, [u.sucursal, req.params.id]);
     si(!rows[0], 'Ese producto no está en tu menú');
-    await c.query(`INSERT INTO menu_historial (sucursal_id, producto_id, estado, fecha, razon, por) VALUES ($1,$2,'Inhabilitado',$3,$4,$5)`, [u.sucursal, req.params.id, ts(ahora()), m, u.nombre]);
-    await bitacora(c, u, { accion: 'producto.inhabilitar', elemento: `Producto ${req.params.id}`, motivo: m, clave: true });
+    const n = await pedidosPendientesCon(c, +req.params.id, u.sucursal);
+    si(n, msgPendientes(n));
+    const ya = await c.query(`SELECT 1 FROM solicitudes WHERE tipo = 'Quitar del menú' AND producto_id = $2 AND sucursal_id = $1 AND estado = 'Solicitada'`, [u.sucursal, req.params.id]);
+    si(ya.rowCount, 'Ya enviaste la solicitud para quitarlo; espera al gerente general');
+    await c.query(`INSERT INTO solicitudes (tipo, estado, sucursal_id, solicitante_id, producto_id, aprueba_rol, nombre, motivo, fecha)
+                   VALUES ('Quitar del menú','Solicitada',$1,$2,$3,'gg',$4,$5,$6)`, [u.sucursal, u.id, req.params.id, rows[0].nombre, m, ts(ahora())]);
+    await notificar(c, 'gg', null, 'Producto por quitar de un menú', `${rows[0].nombre} · ${u.sucursal_nombre}`);
+    await bitacora(c, u, { accion: 'menu.solicitar_quitar', elemento: rows[0].nombre, motivo: m, clave: true });
   });
-  res.json({ ok: true });
+  res.status(201).json({ ok: true });
 });
 
 r.post('/menu/:id/agregar', async (req, res) => {
@@ -470,8 +514,8 @@ r.post('/menu/:id/agregar', async (req, res) => {
 r.get('/mermas', async (req, res) => {
   const s = req.usuario.sucursal;
   const { rows } = await q(
-    `SELECT me.id, me.fecha, me.tipo, me.cantidad AS cant, me.motivo, me.costo, m.nombre AS mp, m.unidad, l.sku AS lote, u.nombre AS por
-       FROM mermas me JOIN materias_primas m ON m.id = me.mp_id LEFT JOIN lotes l ON l.id = me.lote_id LEFT JOIN usuarios u ON u.id = me.registro_id
+    `SELECT me.id, me.fecha, me.tipo, me.cantidad AS cant, me.motivo, me.costo, m.nombre AS mp, m.unidad, l.sku AS lote, u.nombre AS por, pe.num AS pedido
+       FROM mermas me LEFT JOIN materias_primas m ON m.id = me.mp_id LEFT JOIN pedidos pe ON pe.id = me.pedido_id LEFT JOIN lotes l ON l.id = me.lote_id LEFT JOIN usuarios u ON u.id = me.registro_id
       WHERE me.sucursal_id = $1 ORDER BY me.fecha DESC LIMIT 300`, [s]);
   const { rows: lotes } = await q(
     `SELECT l.id, l.sku, l.mp_id, l.vence, l.cantidad AS cant, m.nombre, m.unidad FROM lotes l JOIN materias_primas m ON m.id = l.mp_id
@@ -530,7 +574,8 @@ r.post('/precios', async (req, res) => {
     si(!p, 'Elige un producto de tu menú');
     si(!(precio > 0) || precio === p.precio, 'Escribe un precio distinto del actual');
     const k = await cfg(c);
-    si(neto(precio, k) < (await costoMax(c, p.id)), 'El precio sin IVA no puede ser menor que el costo de producción');
+    const cmax = await costoMax(c, p.id);
+    si(bajoMargen(precio, cmax, k), msgMargen(cmax, k));
     await c.query(`INSERT INTO solicitudes (tipo, estado, sucursal_id, solicitante_id, producto_id, aprueba_rol, nombre, motivo, monto, datos, fecha)
                    VALUES ('Cambio de precio','Solicitada',$1,$2,$3,'gg',$4,$5,$6,$7,$8)`,
     [u.sucursal, u.id, p.id, p.nombre, m, precio, JSON.stringify({ precioActual: p.precio, precio }), ts(ahora())]);
@@ -545,10 +590,12 @@ export async function personaJson(c, x, t = ahora()) {
   const turnos = (await turnosDe(c, [x.id]))[x.id];
   const salRol = await salarioRol(c, x.rol_id);
   const { rows: sol } = await c.query(`SELECT 1 FROM solicitudes WHERE tipo = 'Despido' AND usuario_id = $1 AND estado = 'Solicitada'`, [x.id]);
+  const { rows: ren } = await c.query(`SELECT 1 FROM solicitudes WHERE tipo = 'Renuncia' AND usuario_id = $1 AND estado = 'Solicitada' AND datos->>'salio' IS NULL`, [x.id]);
   return {
     id: x.id, nombre: x.nombre, usuario: x.usuario, rol: x.rol_id, rolNombre: ROLN[x.rol_id], sucursal: x.sucursal_id, foto: x.foto_url,
     turno: turnoHoy(turnos, t), sinTurno: !turnos, salario: salarioDe(x, salRol), salarioRol: salRol, extraAnt: x.extra_antiguedad,
-    ingreso: x.ingreso, telefono: x.telefono, correo: x.correo, documento: x.documento, estado: x.estado, despidoSolicitado: !!sol[0],
+    ingreso: x.ingreso, telefono: x.telefono, correo: x.correo, documento: x.documento, estado: x.estado, despidoSolicitado: !!sol[0], renuncia: !!ren[0],
+    indemnizacion: await indemnizacionDe(c, x),
   };
 }
 
@@ -578,8 +625,8 @@ r.post('/equipo/:id/despedir', async (req, res) => {
   const u = req.usuario;
   const m = validarMotivo(req.body?.motivo);
   await verificarClave(u, req.body?.clave);
-  const ind = await tx(async (c) => despedirDirecto(c, await usuarioPorId(c, req.params.id), u, m));
-  res.json({ ok: true, indemnizacion: ind });
+  const out = await tx(async (c) => solicitarDespido(c, await usuarioPorId(c, req.params.id), u, m));
+  res.status(201).json({ ok: true, ...out });
 });
 
 /* ---------- 5.11 plantilla ---------- */

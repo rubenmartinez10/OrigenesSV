@@ -2,12 +2,14 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { q, tx } from '../db.js';
+import { q, tx, ts } from '../db.js';
 import { config } from '../config.js';
-import { fallo, si, prohibido } from '../lib/errores.js';
-import { bitacora } from '../lib/registro.js';
+import { fallo, si, prohibido, motivo as validarMotivo } from '../lib/errores.js';
+import { bitacora, notificar } from '../lib/registro.js';
 import { cargarUsuario, usuarioPublico } from '../middleware/auth.js';
 import { pagosDe } from '../lib/nomina.js';
+import { ahora } from '../lib/reloj.js';
+import { presentarRenuncia, terminarJornada, pedirRetiro, usuarioPorId } from '../lib/personal.js';
 
 /* ADENDA §1: cada quien edita solo lo suyo (teléfono, correo, contraseña, foto; PIN y clave según su rol). */
 const r = Router();
@@ -21,6 +23,7 @@ r.put('/', async (req, res) => {
   si(telefono && !/^\d{4}-\d{4}$/.test(telefono), 'El teléfono debe tener 8 números con el formato 0000-0000');
   si(correo && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(correo), 'El correo no es válido (ejemplo: nombre@correo.com)');
   await tx(async (c) => {
+    if (correo) si((await c.query('SELECT 1 FROM usuarios WHERE lower(correo) = lower($1) AND id <> $2', [correo, req.usuario.id])).rowCount, 'Ese correo ya está registrado por otra persona');
     await c.query('UPDATE usuarios SET telefono = $2, correo = $3 WHERE id = $1', [req.usuario.id, telefono || null, correo || null]);
     await bitacora(c, req.usuario, { accion: 'perfil.editar', elemento: req.usuario.usuario });
   });
@@ -101,6 +104,30 @@ r.delete('/foto', async (req, res) => {
     await c.query('UPDATE usuarios SET foto_url = NULL WHERE id = $1', [req.usuario.id]);
     await bitacora(c, req.usuario, { accion: 'foto.quitar', elemento: req.usuario.usuario });
   });
+  res.json({ usuario: await yo(req) });
+});
+
+/* Renuncia: hoy es su último día. Sigue trabajando hasta que termine su jornada; durante el día puede pedir retirarla y Recursos Humanos decide. El director no la presenta aquí. */
+r.post('/renuncia', async (req, res) => {
+  const u = req.usuario;
+  si(u.rol === 'director', 'El director no presenta renuncia en el sistema: su salida se coordina con la propiedad');
+  const m = validarMotivo(req.body?.motivo, 'El motivo');
+  await tx(async (c) => {
+    const x = await usuarioPorId(c, u.id);
+    si(x.estado !== 'Activo', 'Tu cuenta ya no está activa');
+    await presentarRenuncia(c, x, m);
+  });
+  res.status(201).json({ usuario: await yo(req) });
+});
+
+r.post('/renuncia/terminar', async (req, res) => {
+  await tx(async (c) => terminarJornada(c, await usuarioPorId(c, req.usuario.id)));
+  res.json({ ok: true });
+});
+
+r.post('/renuncia/retiro', async (req, res) => {
+  const m = validarMotivo(req.body?.motivo, 'El motivo');
+  await tx(async (c) => pedirRetiro(c, await usuarioPorId(c, req.usuario.id), m));
   res.json({ usuario: await yo(req) });
 });
 

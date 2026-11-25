@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Form } from 'react-bootstrap';
 import { api } from '../../lib/api.js';
+import { leerFoto } from '../../lib/fotos.js';
 import { $, fFecha, fmt } from '../../lib/formato.js';
 import { useDatos } from '../../context/Sesion.jsx';
 import { useDialogos } from '../../context/Dialogos.jsx';
-import { Ban, Btn, Campo, Cargando, Chip, Err, Fila, Kv, Mut, Nivel, Panel, Pildoras, Stack, Tabla, Toggle, Vacio } from '../../components/ui.jsx';
+import { Ban, Btn, Campo, Cargando, Chip, Err, Fila, Foto, Kv, Mut, Nivel, Panel, Pildoras, Stack, Tabla, Toggle, Vacio } from '../../components/ui.jsx';
 import { Icono } from '../../components/Icono.jsx';
 
 /* Encargado de bodega · 4.1 Inventario */
@@ -29,6 +30,12 @@ function Ficha({ m, cats, onHide }) {
     const mo = await motivo({ titulo: `Motivo para inhabilitar ${m.nombre}`, nota: usan.length ? `La usan ${usan.length} productos activos: ${usan.join(', ')}.` : '' });
     if (mo && await accion(() => api.post(`/bodega/materias/${m.id}/inhabilitar`, { motivo: mo }), 'Solicitud enviada al gerente')) onHide();
   };
+  const archivo = useRef(null);
+  const cambiarFoto = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (f) accion(async () => api.put(`/bodega/materias/${m.id}/foto`, { dataUrl: await leerFoto(f) }), 'Foto actualizada');
+  };
   const guardar = async () => {
     try {
       await api.put(`/bodega/materias/${m.id}`, ed);
@@ -42,6 +49,17 @@ function Ficha({ m, cats, onHide }) {
       <Btn key="e" onClick={() => { setEr(''); setEd({ nombre: m.nombre, categorias: m.categorias, desc: m.desc || '' }); }}>Editar información</Btn>];
   return (
     <Panel show onHide={onHide} titulo={m.nombre} estado={m.inhabilitada ? 'Inhabilitado' : null} pie={pie}>
+      <div className="tw:flex tw:items-center tw:gap-3">
+        <Foto x={{ ...m, unidad: m.unidad || true }} ampliar className="tw:w-24 tw:h-24 tw:rounded-2xl" icono="tw:text-4xl" />
+        <div className="tw:flex tw:flex-col tw:gap-1.5">
+          <div className="tw:flex tw:gap-2">
+            <Btn v="t" onClick={() => archivo.current.click()}>{m.foto ? 'Cambiar foto' : 'Agregar foto'}</Btn>
+            {m.foto && <Btn v="t" onClick={() => accion(() => api.put(`/bodega/materias/${m.id}/foto`, {}), 'Foto quitada')}>Quitar</Btn>}
+          </div>
+          <Mut>{m.foto ? 'Toca la foto para verla en grande' : 'Sin foto: se muestra un ícono'}</Mut>
+        </div>
+        <input ref={archivo} type="file" accept="image/*" hidden onChange={cambiarFoto} />
+      </div>
       <h4 className="tw:text-sm tw:m-0">Lotes</h4>
       {!datos ? <Cargando /> : datos.lotes.length ? (
         <Tabla cols={['SKU', 'Compra', 'Vence', 'Proveedor', 'Precio', 'Resta', 'Estado']}
@@ -163,7 +181,7 @@ export default function Inventario() {
             <Tabla cols={['Materia prima', 'Categorías', 'Stock', 'Nivel', 'Próximo vencimiento']} filas={L.map((x) => ({
               onClick: () => setVer(x.id), dim: x.inhabilitada, tono: x.inhabilitada ? '' : x.porVencer ? 'rj' : x.minimo > 0 && x.stock >= x.minimo ? 'az' : '',
               celdas: [
-                <span className="tw:inline-flex tw:items-center tw:gap-2.5"><span className="tw:w-[34px] tw:h-[34px] tw:rounded-[14px] tw:bg-brs tw:text-br tw:grid tw:place-items-center"><Icono n="box" size={18} /></span><b>{x.nombre}</b>{x.inhabilitada && <Chip t="Inhabilitada" o="g" />}</span>,
+                <span className="tw:inline-flex tw:items-center tw:gap-2.5"><Foto x={{ ...x, unidad: x.unidad || true }} ampliar className="tw:w-[38px] tw:h-[38px] tw:rounded-[14px] tw:shrink-0" icono="tw:text-lg" /><b>{x.nombre}</b>{x.inhabilitada && <Chip t="Inhabilitada" o="g" />}</span>,
                 <span className="tw:flex tw:flex-wrap tw:gap-1">{x.categorias.map((c) => <Chip key={c} t={c} o="g" sinSimbolo />)}</span>,
                 `${x.stock.toFixed(x.unidad === 'unidad' ? 0 : 1)} ${x.unidad}`,
                 x.minimo ? <Nivel v={x.stock} min={x.minimo} /> : '—',

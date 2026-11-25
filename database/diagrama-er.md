@@ -55,7 +55,9 @@ erDiagram
         varchar tamano FK
         varchar estado
         smallint mesas
+        varchar direccion
         numeric costo
+        text foto_url
     }
     sucursal_plantilla {
         int sucursal_id PK,FK
@@ -77,9 +79,10 @@ erDiagram
         text pass_hash
         text clave_hash
         text pin_hash
-        varchar estado
+        varchar estado "Activo, Despedido, Renunció, Inhabilitado"
         timestamptz ingreso
         boolean cambiar_pass
+        timestamptz reubicacion_desde "su sucursal cerró"
     }
     usuario_historial {
         int id PK
@@ -363,6 +366,10 @@ erDiagram
         smallint mesa
         varchar estado
         numeric total
+        numeric envio "solo delivery"
+        text direccion "solo delivery"
+        varchar telefono "solo delivery"
+        timestamptz cuenta_pedida "el cliente se retira"
         int est_seg
         int reposicion_de FK
         timestamptz creado
@@ -391,6 +398,9 @@ erDiagram
         numeric fondo
         varchar estado
         numeric declarado
+        int tarde_min
+        boolean fuera_turno
+        timestamptz turno_fin
     }
     ventas {
         int id PK
@@ -401,6 +411,9 @@ erDiagram
         int correlativo
         numeric total
         numeric propina
+        smallint estrellas "1 a 5"
+        varchar codigo_generacion "DTE simulado"
+        varchar sello "DTE simulado"
     }
     venta_ajustes {
         int id PK
@@ -527,7 +540,7 @@ erDiagram
     }
     solicitudes {
         int id PK
-        varchar tipo
+        varchar tipo "incluye Renuncia y Apertura de caja"
         varchar estado
         int sucursal_id FK
         int solicitante_id FK
@@ -554,6 +567,7 @@ erDiagram
         int sucursal_id FK
         varchar titulo
         boolean leida
+        boolean rojo "aviso urgente"
     }
     bitacora {
         bigint id PK
@@ -570,7 +584,7 @@ erDiagram
 
 | Tabla | Para qué sirve |
 |---|---|
-| `sistema` | Una sola fila con el reloj simulado: `hora = reloj_base + (ahora_real − real_base)`; con `pausado` el reloj se queda en `reloj_base` (nadie usa la app). Adelantar el tiempo suma a `reloj_base`. |
-| `configuracion` | Una sola fila con los parámetros del negocio (IVA, márgenes, vigencia de cotizaciones, etc.). |
+| `sistema` | Una sola fila con el reloj simulado: `hora = reloj_base + (ahora_real − real_base)`; con `pausado` el reloj se queda en `reloj_base` (nadie usa la app). Adelantar el tiempo suma a `reloj_base`. `fotos_demo` marca que las fotos de la demo ya se asignaron (una sola vez). |
+| `configuracion` | Una sola fila con los parámetros del negocio (IVA, márgenes, vigencia de cotizaciones, etc.), además de cuántos pedidos prepara un cocinero a la vez (`cocina_simultaneos`), el envío del delivery (`envio_delivery`) y la ganancia mínima sobre el costo (`ganancia_min_pct`). |
 | `v_stock`, `v_reservado` | Vistas: existencias vigentes por sucursal y lo apartado por pedidos que aún no se preparan. |
 | `ahora()` | Función SQL que devuelve la hora simulada. |

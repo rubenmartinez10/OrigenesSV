@@ -6,7 +6,7 @@ import { useDialogos } from '../../context/Dialogos.jsx';
 import { Ban, Btn, Card, Cargando, Chip, Mut, Stack, Vacio } from '../../components/ui.jsx';
 import { TiempoPedido } from '../../components/Pedido.jsx';
 
-/** El cocinero prepara un pedido a la vez; el siguiente de su cola pasa a «Mi pedido» al terminar. */
+/** El cocinero prepara varios pedidos a la vez (hasta el máximo configurado); los demás esperan en su cola por orden de llegada. */
 export default function MiPedido({ tab }) {
   const { confirmar, accion } = useDialogos();
   const { datos } = useDatos('/cocinero/mi-pedido', { cada: 4000 });
@@ -14,39 +14,66 @@ export default function MiPedido({ tab }) {
   const P = useMemo(() => cat && Object.fromEntries(cat.productos.map((x) => [x.id, x])), [cat]);
   const M = useMemo(() => cat && Object.fromEntries(cat.materias.map((m) => [m.id, m])), [cat]);
   if (!datos) return <Cargando />;
-  const { actual: p, cola, cancelado } = datos;
+  const { haciendo, cola, cancelado, max } = datos;
+  const lleno = haciendo.length >= max;
 
-  if (tab === 'cola') {
-    return cola.length ? (
-      <Stack>
-        <Mut>Solo preparas uno a la vez. El siguiente pasa a «Mi pedido» cuando termines.</Mut>
-        {cola.map((q, i) => (
-          <Card key={q.id} className="tw:flex tw:flex-col tw:gap-1 tw:border-l-4 tw:border-l-br">
-            <div className="tw:flex tw:items-center tw:gap-2"><b>{i + 1}. {nom(q)} · {donde(q)}</b>{q.rep && <Chip t="Reposición" o="wa" />}<span className="tw:flex-1" /><b>{minutos(est(q))} min</b></div>
-            {q.lineas.map((l) => <div key={l.orden}>{txt(l)}</div>)}
-          </Card>
-        ))}
-      </Stack>
-    ) : <Vacio ic="check">No tienes pedidos en cola</Vacio>;
-  }
-
-  const iniciar = async () => {
+  const iniciar = async (p) => {
     if (await confirmar({ titulo: '¿Iniciar la preparación?', texto: 'Se descontarán los insumos del inventario y ya no regresan.', verbo: 'Iniciar' })) {
       accion(() => api.post(`/cocinero/pedidos/${p.id}/iniciar`));
     }
   };
-  const terminar = async () => {
-    if (await confirmar({ titulo: '¿El pedido está terminado?', texto: 'El mesero lo verá marcado como listo.', verbo: 'Sí, terminado' })) {
+  const terminar = async (p) => {
+    if (await confirmar({ titulo: '¿El pedido está terminado?', texto: 'El mesero recibe el aviso de que está listo.', verbo: 'Sí, terminado' })) {
       accion(() => api.post(`/cocinero/pedidos/${p.id}/terminar`), '✓ Listo. El mesero ya lo ve');
     }
   };
-  const estado = p ? (p.estado === 'Preparando' ? 'Ocupado · preparando' : 'Pedido por iniciar') : 'Libre';
+
+  const tarjeta = (p, i) => (
+    <Card key={p.id} className="tw:flex tw:flex-col tw:gap-2">
+      <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-2">
+        <h3 className="tw:text-[17px] tw:m-0">{i != null ? `${i + 1}. ` : ''}{nom(p)} · {donde(p)}</h3>
+        <Chip t={p.estado} />{p.rep && <Chip t="Reposición" o="wa" />}
+        <span className="tw:flex-1" /><b>{minutos(est(p))} min</b>
+      </div>
+      {p.rep && <Mut>Plato repuesto por mala preparación · repone el pedido #{p.repNum}</Mut>}
+      {p.lineas.map((l) => (
+        <div key={l.orden}>
+          <b>{txt(l)}</b>
+          {P && (
+            <details>
+              <summary>Receta</summary>
+              {Object.entries(uso([{ pr: l.pr, cant: l.cant, extras: l.extras.map((e) => e.pr) }], P)).map(([m, c]) => (
+                <div key={m}>{M[m]?.nombre} {c.toFixed(2)} {M[m]?.unidad}</div>
+              ))}
+            </details>
+          )}
+        </div>
+      ))}
+      <TiempoPedido p={p} />
+      <div>
+        {p.estado === 'Asignado'
+          ? <Btn v="p" disabled={lleno} onClick={() => iniciar(p)}>{lleno ? `Ya preparas ${max}` : 'Iniciar preparación'}</Btn>
+          : <Btn v="p" onClick={() => terminar(p)}>Marcar como hecho</Btn>}
+      </div>
+    </Card>
+  );
+
+  if (tab === 'cola') {
+    return cola.length ? (
+      <Stack>
+        <Mut>Por orden de llegada. Puedes preparar hasta {max} a la vez; inicia el siguiente cuando tengas lugar.</Mut>
+        {cola.map(tarjeta)}
+      </Stack>
+    ) : <Vacio ic="check">No tienes pedidos en cola</Vacio>;
+  }
+
+  const libre = !haciendo.length && !cola.length;
   return (
     <Stack>
       <div className="tw:flex tw:items-center tw:gap-2.5 tw:px-5 tw:py-2.5 tw:rounded-full tw:border tw:border-bd tw:bg-sf tw:w-max tw:max-w-full tw:shadow-osv">
-        <i className={`osv-ping tw:w-2.5 tw:h-2.5 tw:rounded-full ${p ? 'tw:bg-wa tw:text-wa' : 'tw:bg-ok tw:text-ok'}`} />
-        <b>{estado}</b>
-        <small className="tw:text-tx2">{p ? (cola.length ? `${cola.length} en cola detrás de este` : '') : 'Esperando un pedido del jefe de cocina'}</small>
+        <i className={`osv-ping tw:w-2.5 tw:h-2.5 tw:rounded-full ${libre ? 'tw:bg-ok tw:text-ok' : 'tw:bg-wa tw:text-wa'}`} />
+        <b>{libre ? 'Libre' : `Preparando ${haciendo.length} de ${max}`}</b>
+        <small className="tw:text-tx2">{libre ? 'Esperando un pedido del jefe de cocina' : cola.length ? `${cola.length} en cola` : ''}</small>
       </div>
       {cancelado && (
         <Ban className="tw:flex tw:flex-col tw:gap-1">
@@ -54,31 +81,10 @@ export default function MiPedido({ tab }) {
           <div><Btn v="p" onClick={() => accion(() => api.post(`/cocinero/pedidos/${cancelado.id}/visto`))}>Entendido</Btn></div>
         </Ban>
       )}
-      {p ? (
-        <Card className="tw:flex tw:flex-col tw:gap-2">
-          <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-2">
-            <h3 className="tw:text-[17px] tw:m-0">{nom(p)} · {donde(p)}</h3>
-            <Chip t={p.estado} />{p.rep && <Chip t="Reposición" o="wa" />}
-            <span className="tw:flex-1" /><b>{minutos(est(p))} min</b>
-          </div>
-          {p.rep && <Mut>Plato repuesto por mala preparación · repone el pedido #{p.repNum}</Mut>}
-          {p.lineas.map((l) => (
-            <div key={l.orden}>
-              <b>{txt(l)}</b>
-              {P && (
-                <details>
-                  <summary>Receta</summary>
-                  {Object.entries(uso([{ pr: l.pr, cant: l.cant, extras: l.extras.map((e) => e.pr) }], P)).map(([m, c]) => (
-                    <div key={m}>{M[m]?.nombre} {c.toFixed(2)} {M[m]?.unidad}</div>
-                  ))}
-                </details>
-              )}
-            </div>
-          ))}
-          <TiempoPedido p={p} />
-          <div>{p.estado === 'Asignado' ? <Btn v="p" onClick={iniciar}>Iniciar preparación</Btn> : <Btn v="p" onClick={terminar}>Marcar como hecho</Btn>}</div>
-        </Card>
-      ) : !cancelado && <Vacio ic="users">Sin pedido asignado · Esperando al jefe de cocina</Vacio>}
+      {haciendo.map(tarjeta)}
+      {!haciendo.length && cola.length > 0 && <Mut>Nada en preparación. Los pedidos esperan en «Cola».</Mut>}
+      {!haciendo.length && cola[0] && tarjeta(cola[0])}
+      {libre && !cancelado && <Vacio ic="users">Sin pedido asignado · Esperando al jefe de cocina</Vacio>}
     </Stack>
   );
 }

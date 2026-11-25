@@ -127,7 +127,7 @@ export function Catalogo() {
         </Form.Select>
       </div>
       {L.length ? <Tabla cols={['', 'Producto', 'Precio', 'Versión', '']} filas={L.map((p) => [
-        <Foto x={{ ...p, categorias: p.cats }} className="tw:w-12 tw:h-12 tw:rounded-xl" icono="tw:text-2xl" />,
+        <Foto x={{ ...p, categorias: p.cats }} ampliar className="tw:w-12 tw:h-12 tw:rounded-xl" icono="tw:text-2xl" />,
         <div className="tw:flex tw:flex-col tw:gap-1"><b>{p.nombre}</b><div className="tw:flex tw:flex-wrap tw:gap-1">{p.cats.map((c) => <Chip key={c} t={c} o="g" sinSimbolo />)}{p.estado !== 'Activo' && <Chip t={p.estado} />}</div></div>,
         $(p.precio), <Chip t={`v${p.version}`} o="in" sinSimbolo />, <Btn v="p" onClick={() => setEd(p.id)}>Editar</Btn>,
       ])} /> : <Vacio ic="box">Nada coincide con la búsqueda</Vacio>}

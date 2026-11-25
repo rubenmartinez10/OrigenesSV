@@ -1,3 +1,4 @@
+import { cierresRenuncias } from './personal.js';
 import { tx, ts } from '../db.js';
 import { ahora, D, H, fFecha } from './reloj.js';
 import { bitacoraSistema, notificar } from './registro.js';
@@ -24,6 +25,7 @@ export async function correrProcesos() {
     await avisosLotes(c, b, k);
     await stockBajoYPrecios(c, b, k);
     await cierresOrdenados(c, b);
+    await cierresRenuncias(c, b);
   });
 }
 
@@ -303,5 +305,17 @@ async function cierresOrdenados(c, b) {
     await c.query(`UPDATE sucursales SET estado = 'Cerrada', cerrada_en = $2 WHERE id = $1`, [s.id, ts(b)]);
     await c.query(`UPDATE vacantes SET estado = 'Cancelada' WHERE sucursal_id = $1 AND estado = 'Abierta'`, [s.id]);
     await bitacoraSistema(c, 'sucursal.cerrada', s.nombre, 'Sin pedidos ni cajas abiertas: la sucursal quedó cerrada', s.id);
+    // su personal no se despide solo: queda pendiente de reubicar en otra sucursal o de despedir (lo decide Recursos Humanos)
+    const { rows: gente } = await c.query(
+      `UPDATE usuarios SET reubicacion_desde = $2 WHERE sucursal_id = $1 AND estado = 'Activo' AND reubicacion_desde IS NULL RETURNING id`, [s.id, ts(b)]);
+    for (const u of gente) {
+      await c.query('INSERT INTO usuario_historial (usuario_id, fecha, tipo, detalle, por) VALUES ($1,$2,$3,$4,$5)',
+        [u.id, ts(b), 'Sucursal cerrada', `${s.nombre} cerró: pendiente de reubicación o despido`, 'Sistema']);
+    }
+    if (gente.length) {
+      await notificar(c, 'rrhh', null, 'Personal por reubicar', `${s.nombre} cerró: ${gente.length} persona${gente.length === 1 ? '' : 's'} sin sucursal`);
+      await notificar(c, 'gg', null, 'Personal por reubicar', `${s.nombre} cerró: ${gente.length} persona${gente.length === 1 ? '' : 's'} sin sucursal`);
+      await bitacoraSistema(c, 'sucursal.personal_pendiente', s.nombre, `${gente.length} persona${gente.length === 1 ? '' : 's'} pendiente${gente.length === 1 ? '' : 's'} de reubicación`, s.id);
+    }
   }
 }

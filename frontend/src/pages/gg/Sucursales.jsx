@@ -1,20 +1,72 @@
 import { useEffect, useState } from 'react';
+import { EditarSucursal, ListaSucursales, Valoracion } from '../../components/Franquicia.jsx';
 import { Form } from 'react-bootstrap';
 import { api } from '../../lib/api.js';
 import { $, fFecha, fmt } from '../../lib/formato.js';
 import { useDatos } from '../../context/Sesion.jsx';
 import { useDialogos } from '../../context/Dialogos.jsx';
-import { Ban, Btn, Campo, Card, Cargando, Chip, Err, Grid, Kv, Mut, Panel, Pildoras, Seg, Stack, Tabla, Vacio } from '../../components/ui.jsx';
+import { Ban, Btn, Campo, Card, Cargando, Chip, Err, Foto, Grid, Kv, Mut, Panel, Pildoras, Seg, Stack, Tabla, Vacio } from '../../components/ui.jsx';
 
 /* Gerente general · 7.8 Sucursales, 7.9 Despidos, 7.10 Plantilla */
 const ESTS = { Operando: 'ok', 'Cierre ordenado': 'er', Cerrada: 'g' };
 const TONO_P = { 'Compra aprobada': 'ok', 'Venta aprobada': 'ok', Abierta: 'ok', Rechazada: 'er', Solicitada: 'g' };
 
+/** Nombre que el sistema pondría si no se escribe uno: la zona, con número si ya hay otra sucursal ahí. */
+const sugerido = (zona, sucs) => {
+  const usados = new Set(sucs.map((s) => s.nombre.trim().toLowerCase()));
+  let n = zona;
+  for (let i = 2; usados.has(n.toLowerCase()); i++) n = `${zona} ${i}`;
+  return n;
+};
+const dirOk = (d) => d.trim().length >= 8 && d.trim().length <= 160;
+
+/** Nombre y dirección del local nuevo: así se distinguen dos sucursales de una misma zona. */
+function DatosLocal({ E, set, zona, sucs }) {
+  const otras = sucs.filter((s) => s.zona === zona);
+  return <>
+    <Campo l="Nombre de la sucursal (opcional)">
+      <Form.Control maxLength={60} value={E.nombre} placeholder={sugerido(zona, sucs)} onChange={(e) => set({ nombre: e.target.value })} />
+    </Campo>
+    <Campo l="Dirección del local (8 a 160 caracteres)">
+      <Form.Control maxLength={160} value={E.dir} placeholder="Calle, número y punto de referencia" onChange={(e) => set({ dir: e.target.value })} />
+    </Campo>
+    <Mut>{otras.length ? `Ya hay ${otras.length === 1 ? 'una sucursal' : `${otras.length} sucursales`} en ${zona} (${otras.map((s) => s.nombre).join(', ')}). Un nombre propio, como «${zona} Plaza», ayuda a distinguirlas; si lo dejas vacío se usa «${sugerido(zona, sucs)}».` : 'Si dejas el nombre vacío se usa el nombre de la zona.'}</Mut>
+  </>;
+}
+
+/** Ficha de una sucursal: foto, datos completos y el botón para editar nombre y dirección. */
+function FichaSucursal({ s, onHide, onEditar }) {
+  return (
+    <Panel show onHide={onHide} titulo={s.nombre}>
+      <Foto x={{ ...s, sede: true }} ampliar className="tw:w-full tw:h-44 tw:rounded-2xl" icono="tw:text-6xl" />
+      <Kv pares={[['Zona', s.zona], ['Dirección', s.direccion && s.direccion !== s.zona ? s.direccion : '—'], ['Tamaño', s.tamanoNombre], ['Mesas', s.mesas], ['Estado', s.estado]]} />
+      <Valoracion s={s} />
+      <div><Btn v="t" onClick={onEditar}>Editar nombre y dirección</Btn></div>
+    </Panel>
+  );
+}
+
+/** El gerente general abre la sucursal comprada: le pone nombre y dirección. */
+function AbrirSucursal({ p, sucs, onHide }) {
+  const { accion } = useDialogos();
+  const [E, setE] = useState({ nombre: '', dir: '' });
+  const set = (x) => setE({ ...E, ...x });
+  return (
+    <Panel show onHide={onHide} titulo="Abrir sucursal"
+      pie={[<Btn key="c" v="t" onClick={onHide}>Cancelar</Btn>,
+        <Btn key="a" v="p" disabled={!dirOk(E.dir)} onClick={async () => { if (await accion(() => api.post(`/gg/sucursales/propuestas/${p.id}/abrir`, { nombre: E.nombre, direccion: E.dir }), 'Sucursal abierta. Vacantes generadas')) onHide(); }}>Abrir sucursal</Btn>]}>
+      <Kv pares={[['Zona', p.zona], ['Tamaño', p.tamanoNombre]]} />
+      <DatosLocal E={E} set={set} zona={p.zona} sucs={sucs} />
+      <Mut>Se crea con su tamaño y se generan las vacantes mínimas de cada rol con máxima prioridad para que Recursos Humanos las cubra. El sistema genera el transporte y el tiempo de entrega de cada proveedor activo.</Mut>
+    </Panel>
+  );
+}
+
 /** Proponer compra o venta de una sucursal (el costo lo calcula el sistema según la zona y el tamaño). */
 export function Proponer({ datos, url = '/gg/sucursales/propuestas', costoUrl = '/gg/sucursales/costo', directo, onHide }) {
   const { accion } = useDialogos();
   const operando = datos.sucursales.filter((s) => s.estado === 'Operando');
-  const [E, setE] = useState({ modo: 'Comprar', zona: datos.zonas[0], tam: 'mediana', motivo: '', suc: operando[0]?.id, costo: null });
+  const [E, setE] = useState({ modo: 'Comprar', zona: datos.zonas[0], tam: 'mediana', motivo: '', suc: operando[0]?.id, costo: null, nombre: '', dir: '' });
   const [bl, setBl] = useState('');
   const set = (x) => setE({ ...E, ...x });
   useEffect(() => {
@@ -23,9 +75,9 @@ export function Proponer({ datos, url = '/gg/sucursales/propuestas', costoUrl = 
   }, [E.modo, E.suc]);
   const calcular = () => accion(async () => { const r = await api.get(`${costoUrl}?zona=${encodeURIComponent(E.zona)}&tam=${E.tam}`); set({ costo: r.costo }); });
   const comprar = E.modo === 'Comprar';
-  const ok = (directo || E.motivo.trim().length >= 10) && (comprar ? E.costo != null : !bl);
+  const ok = (directo ? dirOk(E.dir) : E.motivo.trim().length >= 10) && (comprar ? E.costo != null : !bl);
   const enviar = async () => {
-    const cuerpo = directo ? { zona: E.zona, tamano: E.tam, costo: E.costo }
+    const cuerpo = directo ? { zona: E.zona, tamano: E.tam, costo: E.costo, nombre: E.nombre, direccion: E.dir }
       : comprar ? { tipo: 'Compra', zona: E.zona, tamano: E.tam, costo: E.costo, motivo: E.motivo } : { tipo: 'Venta', suc: E.suc, motivo: E.motivo };
     if (await accion(() => api.post(url, cuerpo), directo ? 'Sucursal creada' : 'Enviada al director')) onHide();
   };
@@ -46,6 +98,7 @@ export function Proponer({ datos, url = '/gg/sucursales/propuestas', costoUrl = 
         <Campo l="Sucursal"><Form.Select value={E.suc} onChange={(e) => set({ suc: +e.target.value })}>{operando.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}</Form.Select></Campo>
       )}
       {!directo && <Campo l="Motivo (mín. 10 caracteres)"><Form.Control as="textarea" rows={3} value={E.motivo} onChange={(e) => set({ motivo: e.target.value })} /></Campo>}
+      {directo && <DatosLocal E={E} set={set} zona={E.zona} sucs={datos.sucursales} />}
       {directo && <Mut>Se abre con su menú, proveedores y vacantes de máxima prioridad para Recursos Humanos.</Mut>}
       {!comprar && bl && <Err>{bl}</Err>}
     </Panel>
@@ -54,16 +107,15 @@ export function Proponer({ datos, url = '/gg/sucursales/propuestas', costoUrl = 
 
 const SS = { v: 'suc' };
 function SucursalesTab() {
-  const { confirmar, accion } = useDialogos();
   const { datos } = useDatos('/gg/sucursales');
   const [v, setVS] = useState(SS.v);
   const [prop, setProp] = useState(false);
+  const [abriendo, setAbriendo] = useState(null);
+  const [verSuc, setVerSuc] = useState(null);
+  const [editando, setEditando] = useState(null);
   if (!datos) return <Cargando />;
   const abrir = datos.propuestas.filter((p) => p.estado === 'Compra aprobada');
-  const abrirSuc = async (p) => {
-    if (!(await confirmar({ titulo: 'Abrir sucursal', texto: 'Se crea la sucursal con su tamaño y se generan las vacantes mínimas de cada rol con máxima prioridad para que Recursos Humanos las cubra. El sistema genera el transporte y el tiempo de entrega de cada proveedor activo.', verbo: 'Abrir' }))) return;
-    await accion(() => api.post(`/gg/sucursales/propuestas/${p.id}/abrir`), 'Sucursal abierta. Vacantes generadas');
-  };
+  const abrirSuc = (p) => setAbriendo(p);
   return (
     <Stack>
       <div className="tw:flex tw:flex-wrap tw:items-center tw:gap-2">
@@ -77,17 +129,25 @@ function SucursalesTab() {
         p.tipo, p.tipo === 'Compra' ? `${p.zona} · ${p.tamanoNombre}` : p.sucNombre, $(p.costo),
         <><Chip t={p.estado} o={TONO_P[p.estado]} />{p.rechazo && <div className="tw:text-er tw:text-xs">Motivo: {p.rechazo}</div>}</>, fmt(p.fecha),
       ])} /> : <Vacio ic="list">No hay propuestas de compra o venta</Vacio>)
-        : <Grid min={240}>{datos.sucursales.map((s) => (
-          <Card key={s.id} className="tw:flex tw:flex-col tw:gap-1.5">
-            <b className="tw:text-[16px]">{s.nombre}</b>
-            <Mut>{s.zona} · {s.tamanoNombre} · {s.mesas} mesas</Mut>
-            <div className="tw:flex tw:flex-wrap tw:gap-1.5">
-              <Chip t={s.estado === 'Cierre ordenado' ? 'Cierre ordenado en curso' : s.estado} o={ESTS[s.estado]} />
-              {s.vacantes && <Chip t={`Vacantes ${s.vacantes.c} de ${s.vacantes.t} cubiertas`} o={s.vacantes.c >= s.vacantes.t ? 'ok' : 'wa'} />}
+        : <ListaSucursales items={datos.sucursales} render={(s) => (
+          <Card key={s.id} className="tw:flex tw:gap-3.5 tw:cursor-pointer tw:hover:border-[#B9CEF0]" onClick={() => setVerSuc(s.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && setVerSuc(s.id)}>
+            <Foto x={{ ...s, sede: true }} className="tw:w-[104px] tw:h-[104px] tw:rounded-2xl tw:shrink-0" icono="tw:text-4xl" />
+            <div className="tw:flex tw:flex-col tw:gap-1.5 tw:min-w-0">
+              <b className="tw:text-[16px]">{s.nombre}</b>
+              <Mut>{s.zona} · {s.tamanoNombre} · {s.mesas} mesas</Mut>
+              {s.direccion && s.direccion !== s.zona && <div className="tw:truncate"><Mut>{s.direccion}</Mut></div>}
+              <div className="tw:flex tw:flex-wrap tw:gap-1.5">
+                <Chip t={s.estado === 'Cierre ordenado' ? 'Cierre ordenado en curso' : s.estado} o={ESTS[s.estado]} />
+                {s.vacantes && <Chip t={`Vacantes ${s.vacantes.c} de ${s.vacantes.t} cubiertas`} o={s.vacantes.c >= s.vacantes.t ? 'ok' : 'wa'} />}
+              </div>
+              <Valoracion s={s} />
             </div>
           </Card>
-        ))}</Grid>}
+        )} />}
       {prop && <Proponer datos={datos} onHide={() => setProp(false)} />}
+      {verSuc && (() => { const s = datos.sucursales.find((x) => x.id === verSuc); return s && <FichaSucursal s={s} onHide={() => setVerSuc(null)} onEditar={() => setEditando(s)} />; })()}
+      {editando && <EditarSucursal s={editando} onHide={() => setEditando(null)} />}
+      {abriendo && <AbrirSucursal p={abriendo} sucs={datos.sucursales} onHide={() => setAbriendo(null)} />}
     </Stack>
   );
 }
@@ -104,6 +164,11 @@ function Despidos() {
     if (!(await confirmar({ titulo: `Aprobar el despido de ${x.usuarioNombre}`, texto: 'Se aplica con su indemnización (art. 58) y la persona queda sin acceso. El historial se conserva.', verbo: 'Aprobar', rojo: true }))) return;
     if (await accion(() => api.post(`/gg/despidos/${x.id}/aprobar`), 'Despido aplicado')) setVer(null);
   };
+  const decidir = async (ok) => {
+    const m = ok ? null : await motivo({ titulo: 'Motivo para no aceptar el retiro' });
+    if (!ok && !m) return;
+    if (await accion(() => api.post(`/gg/despidos/${x.id}/retiro`, { aceptar: ok, motivo: m }), ok ? 'Renuncia retirada: se queda en su puesto' : 'Retiro rechazado: hoy sigue siendo su último día')) setVer(null);
+  };
   const rechazar = async () => {
     const m = await motivo({ titulo: 'Motivo del rechazo' });
     if (m && await accion(() => api.post(`/gg/despidos/${x.id}/rechazar`, { motivo: m }), 'Despido rechazado')) setVer(null);
@@ -112,14 +177,19 @@ function Despidos() {
     <Stack>
       <div><Pildoras opciones={[['sol', `Solicitudes (${datos.solicitudes.length})`], ['rep', `Reportes (${datos.reportes.length})`]]} valor={v} onChange={(y) => { SD.v = y; setVS(y); }} /></div>
       {v === 'rep' ? <>
-        <Mut>Informativo: despidos que aprobaron los gerentes de sucursal.</Mut>
+        <Mut>Informativo: despidos aplicados antes del proceso único (cuando los aprobaba el gerente de sucursal).</Mut>
         {datos.reportes.length ? <Tabla cols={['Empleado', 'Sucursal', 'Razón', 'Indemnización', 'Aprobó', 'Fecha']} filas={datos.reportes.map((s) => [
           s.usuarioNombre, s.sucNombre, s.motivo, $(s.datos?.indemn?.monto || s.monto || 0), s.aproboNombre || '—', fFecha(s.cierre)])} /> : <Vacio ic="list">No hay reportes de despidos</Vacio>}
-      </> : datos.solicitudes.length ? <Tabla cols={['Empleado', 'Rol', 'Fecha']} filas={datos.solicitudes.map((s) => ({ onClick: () => setVer(s.id), celdas: [s.usuarioNombre, s.rolNombre, fmt(s.fecha)] }))} />
-        : <Vacio ic="check">No hay despidos por aprobar</Vacio>}
+      </> : datos.solicitudes.length ? <Tabla cols={['Empleado', 'Rol', 'Salida', 'Fecha']} filas={datos.solicitudes.map((s) => ({ onClick: () => setVer(s.id), celdas: [s.usuarioNombre, s.rolNombre, s.tipo === 'Renuncia' ? 'Renuncia' : 'Despido', fmt(s.fecha)] }))} />
+        : <Vacio ic="check">No hay despidos ni retiros de renuncia por decidir</Vacio>}
       {x && (
-        <Panel show onHide={() => setVer(null)} titulo={`Despido · ${x.usuarioNombre}`} estado="Solicitada" pie={[<Btn key="r" onClick={rechazar}>Rechazar</Btn>, <Btn key="a" v="red" onClick={aprobar}>Aprobar</Btn>]}>
-          <Kv pares={[['Empleado', x.usuarioNombre], ['Rol', x.rolNombre], ['Sucursal', x.sucNombre], ['Razón de Recursos Humanos', x.motivo], ['Fecha', fmt(x.fecha)]]} />
+        <Panel show onHide={() => setVer(null)} titulo={`${x.tipo === 'Renuncia' ? 'Renuncia' : 'Despido'} · ${x.usuarioNombre}`} estado="Solicitada" pie={x.tipo === 'Renuncia' ? [<Btn key="rr" onClick={() => decidir(false)}>Rechazar retiro</Btn>, <Btn key="ra" v="p" onClick={() => decidir(true)}>Aceptar retiro</Btn>] : [<Btn key="r" onClick={rechazar}>Rechazar</Btn>, <Btn key="a" v="red" onClick={aprobar}>Aprobar</Btn>]}>
+          <Kv pares={[['Empleado', x.usuarioNombre], ['Rol', x.rolNombre], ['Sucursal', x.sucNombre],
+            [x.tipo === 'Renuncia' ? 'Motivo de su renuncia' : 'Razón', x.motivo],
+            ...(x.tipo === 'Despido' ? [['Lo pidió', `${x.solicitanteNombre}${x.datos?.pidioRol === 'gerente' ? ' (gerente de sucursal)' : ''}`],
+              ['Recursos Humanos', x.datos?.rrhh ? `Aceptado por ${x.datos.rrhh.por}` : 'Lo pidió Recursos Humanos'],
+              ...(x.datos?.indemnEstimada ? [['Indemnización estimada', `${$(x.datos.indemnEstimada.monto)} (${x.datos.indemnEstimada.dias} días)`]] : [])] : []),
+            ['Fecha', fmt(x.fecha)]]} />
         </Panel>
       )}
     </Stack>

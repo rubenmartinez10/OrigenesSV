@@ -1,9 +1,9 @@
 import bcrypt from 'bcryptjs';
 import { ts } from '../db.js';
-import { ahora, D, lunes, semanaKey } from './reloj.js';
+import { ahora, D, lunes, semanaKey, inicioDia } from './reloj.js';
 import { fallo } from './errores.js';
 import { bitacora, notificar } from './registro.js';
-import { r2 } from './negocio.js';
+import { r2, cfg } from './negocio.js';
 
 /* Reglas de personal (mismas del borrador): niveles, despidos, cambios de rol, vacantes, nómina. */
 export const NIVEL = { mesero: 1, cocinero: 1, jefe: 2, bodega: 2, gerente: 3, rrhh: 4, gg: 5, director: 6 };
@@ -17,9 +17,9 @@ export async function salarioRol(c, rol) {
 export const salarioDe = (u, salRol) => r2(salRol + (u.extra_antiguedad || 0));
 
 /** Indemnización (Código de Trabajo, art. 58): 30 días por año, mínimo 15, tope de 4 salarios mínimos diarios. */
-export function indemnizacion(u, salario, t = ahora()) {
+export function indemnizacion(u, salario, t = ahora(), salarioMinimo = 408.8) {
   const anios = Math.max(0, (t - u.ingreso) / (365.25 * D));
-  const diario = Math.min(salario / 30, 4 * 13.44);
+  const diario = Math.min(salario / 30, 4 * (salarioMinimo / 30));
   const dias = Math.max(15, 30 * anios);
   return { anios: r2(anios), dias: r2(dias), base: r2(diario), monto: r2(dias * diario) };
 }
@@ -64,6 +64,7 @@ export async function abrirVacantes(c, s, rol, cant, origen, prioridad, solicitu
 /** Si al salir alguien la sucursal queda por debajo de lo necesario, se abre una vacante de prioridad alta. */
 export async function vacanteSiFalta(c, s, rol, origen, solicitudId) {
   if (!s || !ROLES_SUC.includes(rol)) return;
+  if (!(await c.query(`SELECT 1 FROM sucursales WHERE id = $1 AND estado = 'Operando'`, [s])).rowCount) return;
   if ((await activos(c, s, rol)).length + (await vacantesPend(c, s, rol)) < (await necesarios(c, s, rol))) {
     await abrirVacantes(c, s, rol, 1, origen, 'Alta', solicitudId);
   }
@@ -148,21 +149,160 @@ export async function aplicarDespido(c, solicitudId, aprobador) {
   const bl = await despidoBloqueo(c, u);
   if (bl) throw fallo(bl);
   const t = ahora();
-  const ind = indemnizacion(u, salarioDe(u, await salarioRol(c, u.rol_id)), t);
+  const ind = indemnizacion(u, salarioDe(u, await salarioRol(c, u.rol_id)), t, Number((await cfg(c)).salario_minimo));
   await c.query(`UPDATE usuarios SET estado = 'Despedido', fecha_baja = $2 WHERE id = $1`, [u.id, ts(t)]);
   await historial(c, u.id, 'Despido', `Aprobado por ${aprobador.nombre} · ${sol.motivo}`, aprobador.nombre);
   await c.query(`UPDATE solicitudes SET estado = 'Aplicada', decidio_id = $2, cierre = $3, monto = $4, datos = datos || $5::jsonb WHERE id = $1`,
     [sol.id, aprobador.id, ts(t), ind.monto, JSON.stringify({ indemn: ind })]);
   await c.query(`DELETE FROM turnos WHERE usuario_id = $1 AND (semana IS NULL OR semana >= $2::date)`, [u.id, semanaKey(lunes(t))]);
   await c.query(`UPDATE solicitudes SET estado = 'Cancelada', cierre = $3 WHERE id <> $2 AND estado = 'Solicitada'
-                   AND tipo IN ('Despido','Restablecer contraseña') AND (usuario_id = $1 OR solicitante_id = $1)`, [u.id, sol.id, ts(t)]);
+                   AND tipo IN ('Despido','Renuncia','Restablecer contraseña') AND (usuario_id = $1 OR solicitante_id = $1)`, [u.id, sol.id, ts(t)]);
   await vacanteSiFalta(c, u.sucursal_id, u.rol_id, 'Reemplazo por despido', sol.id);
   if (aprobador.rol !== 'gg') await notificar(c, 'gg', null, 'Despido aprobado en sucursal', `${u.nombre} · indemnización $${ind.monto.toFixed(2)}`);
   await notificar(c, 'rrhh', null, 'Despido aprobado: vacante abierta', u.nombre);
   return ind;
 }
 
-/** Despido directo (gerente con clave o director): se crea la solicitud y se aplica de inmediato. */
+/** Quién decide si se acepta retirar una renuncia: Recursos Humanos (y el gerente general, si quien renuncia es Recursos Humanos). La renuncia en sí no la aprueba nadie. */
+export const decideRetiro = (u) => (u.rol_id === 'rrhh' ? 'gg' : 'rrhh');
+
+/** Renuncia vigente de una persona: presentada y todavía sin su última jornada terminada. */
+export async function renunciaVigente(c, usuarioId) {
+  const { rows } = await c.query(
+    `SELECT * FROM solicitudes WHERE tipo = 'Renuncia' AND usuario_id = $1 AND estado = 'Solicitada' AND datos->>'salio' IS NULL ORDER BY id DESC LIMIT 1 FOR UPDATE`, [usuarioId]);
+  return rows[0] || null;
+}
+const enSegunda = (t) => t.replace(/^Tiene/, 'Tienes').replace('debe cerrarla antes', 'ciérrala antes');
+
+/**
+ * Presentar la renuncia: hoy es su último día. Sigue trabajando hasta terminar su jornada. La vacante se abre desde ya para que Recursos Humanos contrate
+ * (aunque sea la única persona de su rol). Los puestos centrales únicos (Recursos Humanos, gerente general) no pueden quedar vacíos.
+ */
+export async function presentarRenuncia(c, u, motivo) {
+  const bl = await ultimoCentral(c, u);
+  if (bl) throw fallo(`Todavía no puedes renunciar: ${bl.charAt(0).toLowerCase()}${bl.slice(1)}`);
+  if (await renunciaVigente(c, u.id)) throw fallo('Ya presentaste tu renuncia');
+  const ap = decideRetiro(u);
+  const t = ahora();
+  const { rows } = await c.query(
+    `INSERT INTO solicitudes (tipo, estado, sucursal_id, solicitante_id, usuario_id, aprueba_rol, nombre, motivo, fecha)
+     VALUES ('Renuncia','Solicitada',$1,$2,$2,$3,$4,$5,$6) RETURNING id`, [u.sucursal_id, u.id, ap, u.nombre, motivo, ts(t)]);
+  const id = rows[0].id;
+  await historial(c, u.id, 'Renuncia', `Presentada · hoy es su último día · ${motivo}`, u.nombre);
+  await c.query(`UPDATE solicitudes SET estado = 'Cancelada', cierre = $3 WHERE id <> $2 AND estado = 'Solicitada' AND tipo = 'Despido' AND usuario_id = $1`, [u.id, id, ts(t)]);
+  // la vacante se abre ya: cuenta como si la persona ya no estuviera
+  if (u.sucursal_id && ROLES_SUC.includes(u.rol_id)
+    && (await c.query(`SELECT 1 FROM sucursales WHERE id = $1 AND estado = 'Operando'`, [u.sucursal_id])).rowCount
+    && (await activos(c, u.sucursal_id, u.rol_id)).filter((x) => x.id !== u.id).length + (await vacantesPend(c, u.sucursal_id, u.rol_id)) < (await necesarios(c, u.sucursal_id, u.rol_id))) {
+    await abrirVacantes(c, u.sucursal_id, u.rol_id, 1, 'Reemplazo por renuncia', 'Alta', id);
+  }
+  // aviso (no hay nada que aprobar): el gerente de la sucursal, Recursos Humanos y el gerente general se enteran
+  const detalle = `${u.nombre} · ${ROLN[u.rol_id]} · último día hoy · ${motivo}`;
+  if (u.sucursal_id && u.rol_id !== 'gerente') await notificar(c, 'gerente', u.sucursal_id, 'Renuncia presentada: vacante abierta', detalle);
+  if (u.rol_id !== 'rrhh') await notificar(c, 'rrhh', null, 'Renuncia presentada: vacante abierta', detalle);
+  if (u.rol_id !== 'gg') await notificar(c, 'gg', null, 'Renuncia presentada', detalle);
+  await bitacora(c, { id: u.id, nombre: u.nombre, rol: u.rol_id }, { accion: 'renuncia.presentar', elemento: u.usuario, motivo, sucursal: u.sucursal_id });
+  return ap;
+}
+
+/** Cierra el acceso de quien renunció: ya terminó su última jornada. */
+async function completarRenuncia(c, sol, u, automatico) {
+  const t = ahora();
+  await c.query(`UPDATE usuarios SET estado = 'Renunció', fecha_baja = $2 WHERE id = $1`, [u.id, ts(t)]);
+  await c.query(`UPDATE solicitudes SET estado = 'Aplicada', cierre = $3, datos = datos || $2::jsonb WHERE id = $1`, [sol.id, JSON.stringify({ salio: true, salioEn: t, automatico: !!automatico }), ts(t)]);
+  await historial(c, u.id, 'Renuncia', automatico ? 'Terminó su última jornada (cierre automático al acabar el día)' : 'Terminó su última jornada', u.nombre);
+  await c.query(`DELETE FROM turnos WHERE usuario_id = $1 AND (semana IS NULL OR semana >= $2::date)`, [u.id, semanaKey(lunes(t))]);
+  await c.query(`UPDATE solicitudes SET estado = 'Cancelada', cierre = $2 WHERE estado = 'Solicitada' AND tipo IN ('Despido','Restablecer contraseña') AND (usuario_id = $1 OR solicitante_id = $1)`, [u.id, ts(t)]);
+  await notificar(c, 'rrhh', null, 'Renuncia efectiva', `${u.nombre} · ${ROLN[u.rol_id]} ya no tiene acceso`);
+  await bitacora(c, { id: u.id, nombre: u.nombre, rol: u.rol_id }, { accion: 'renuncia.salida', elemento: u.usuario, sucursal: u.sucursal_id });
+}
+
+/** La persona termina su jornada: desde ahora no puede volver a entrar. */
+export async function terminarJornada(c, u) {
+  const sol = await renunciaVigente(c, u.id);
+  if (!sol) throw fallo('No tienes una renuncia pendiente');
+  if (sol.datos?.retiro?.estado === 'Solicitado') throw fallo('Pediste retirar tu renuncia: espera la decisión de Recursos Humanos');
+  const bl = await ocupado(c, u);
+  if (bl) throw fallo(`Antes de terminar tu jornada: ${enSegunda(bl).charAt(0).toLowerCase()}${enSegunda(bl).slice(1)}`);
+  await completarRenuncia(c, sol, u, false);
+}
+
+/** Pasada la medianoche del día de la renuncia, quien ya no esté ocupado queda fuera aunque no haya presionado «Terminar mi jornada». */
+export async function cierresRenuncias(c, b) {
+  const { rows } = await c.query(
+    `SELECT id FROM solicitudes WHERE tipo = 'Renuncia' AND estado = 'Solicitada' AND datos->>'salio' IS NULL AND fecha < $1 ORDER BY id`, [ts(inicioDia(b))]);
+  for (const x of rows) {
+    const sol = await c.query('SELECT * FROM solicitudes WHERE id = $1 FOR UPDATE', [x.id]).then((r) => r.rows[0]);
+    const u = await usuarioPorId(c, sol.usuario_id);
+    if (u.estado !== 'Activo') { await c.query(`UPDATE solicitudes SET estado = 'Cancelada', cierre = $2 WHERE id = $1`, [sol.id, ts(b)]); continue; }
+    if (sol.datos?.retiro?.estado === 'Solicitado' || await ocupado(c, u)) continue;
+    await completarRenuncia(c, sol, u, true);
+  }
+}
+
+/** Durante su último día la persona puede pedir retirar la renuncia; Recursos Humanos decide. */
+export async function pedirRetiro(c, u, motivo) {
+  const sol = await renunciaVigente(c, u.id);
+  if (!sol) throw fallo('No tienes una renuncia pendiente');
+  if (sol.datos?.retiro) throw fallo(sol.datos.retiro.estado === 'Solicitado' ? 'Ya pediste retirar tu renuncia' : 'Recursos Humanos ya respondió a tu petición de retiro');
+  await c.query(`UPDATE solicitudes SET datos = datos || $2::jsonb WHERE id = $1`, [sol.id, JSON.stringify({ retiro: { estado: 'Solicitado', motivo, fecha: ahora() } })]);
+  const quien = decideRetiro(u);
+  await notificar(c, quien, null, 'Piden retirar una renuncia', `${u.nombre} · ${ROLN[u.rol_id]} · ${motivo}`);
+  await bitacora(c, { id: u.id, nombre: u.nombre, rol: u.rol_id }, { accion: 'renuncia.pedir_retiro', elemento: u.usuario, motivo, sucursal: u.sucursal_id });
+}
+
+/** Recursos Humanos (o el gerente general, si es la renuncia de Recursos Humanos) acepta o rechaza el retiro. */
+export async function decidirRetiro(c, solicitudId, aceptar, decisor, motivoRechazo) {
+  const { rows } = await c.query(`SELECT * FROM solicitudes WHERE id = $1 AND tipo = 'Renuncia' FOR UPDATE`, [solicitudId]);
+  const sol = rows[0];
+  if (!sol || sol.datos?.retiro?.estado !== 'Solicitado' || sol.datos?.salio) throw fallo('Esta petición de retiro ya no está pendiente');
+  const u = await usuarioPorId(c, sol.usuario_id);
+  if (decisor.rol !== decideRetiro(u)) throw fallo('Esta petición la decide otra persona');
+  const t = ahora();
+  const retiro = { ...sol.datos.retiro, estado: aceptar ? 'Aceptado' : 'Rechazado', decidio: decisor.nombre, ...(aceptar ? {} : { motivoRechazo }), fechaDecision: t };
+  if (aceptar) {
+    await c.query(`UPDATE solicitudes SET estado = 'Cancelada', cierre = $2, datos = datos || $3::jsonb WHERE id = $1`, [sol.id, ts(t), JSON.stringify({ retiro })]);
+    await c.query(`UPDATE vacantes SET estado = 'Cancelada' WHERE solicitud_id = $1 AND estado = 'Abierta' AND cubiertas = 0`, [sol.id]);
+    await historial(c, u.id, 'Renuncia', `Retirada: ${decisor.nombre} aceptó la petición`, decisor.nombre);
+    if (u.sucursal_id) await notificar(c, 'gerente', u.sucursal_id, 'Renuncia retirada', `${u.nombre} se queda en su puesto`);
+  } else {
+    await c.query(`UPDATE solicitudes SET datos = datos || $2::jsonb WHERE id = $1`, [sol.id, JSON.stringify({ retiro })]);
+    await historial(c, u.id, 'Renuncia', `Retiro rechazado por ${decisor.nombre} · ${motivoRechazo}`, decisor.nombre);
+  }
+  await bitacora(c, decisor, { accion: aceptar ? 'renuncia.retiro_aceptado' : 'renuncia.retiro_rechazado', elemento: sol.nombre, motivo: motivoRechazo, sucursal: sol.sucursal_id });
+}
+
+/** Indemnización estimada hoy para alguien (la definitiva se calcula al aprobarse el despido). */
+export async function indemnizacionDe(c, u) {
+  return indemnizacion(u, salarioDe(u, await salarioRol(c, u.rol_id)), ahora(), Number((await cfg(c)).salario_minimo));
+}
+
+/**
+ * Solicitud de despido: el mismo proceso para cualquier persona.
+ * La pide el gerente de sucursal (de su personal) o Recursos Humanos, siempre con la razón y la indemnización estimada.
+ * Si la pide el gerente, primero la acepta Recursos Humanos; después la aprueba el gerente general, y solo entonces se aplica.
+ */
+export async function solicitarDespido(c, u, por, motivo) {
+  if (por.rol === 'gerente') {
+    if (u.sucursal_id !== por.sucursal || !puedeSobre(por, u)) throw fallo('Solo puedes solicitar el despido de personal de tu sucursal');
+  }
+  if (u.estado !== 'Activo') throw fallo('Esta persona ya no está activa');
+  const { rows: ya } = await c.query(`SELECT 1 FROM solicitudes WHERE tipo = 'Despido' AND usuario_id = $1 AND estado = 'Solicitada'`, [u.id]);
+  if (ya[0]) throw fallo('Ya hay un despido solicitado para esta persona');
+  const bl = await despidoBloqueo(c, u);
+  if (bl) throw fallo(bl);
+  const ind = await indemnizacionDe(c, u);
+  const ap = por.rol === 'gerente' ? 'rrhh' : 'gg';
+  await c.query(
+    `INSERT INTO solicitudes (tipo, estado, sucursal_id, solicitante_id, usuario_id, aprueba_rol, nombre, motivo, fecha, datos)
+     VALUES ('Despido','Solicitada',$1,$2,$3,$4,$5,$6,$7,$8)`,
+    [u.sucursal_id, por.id, u.id, ap, u.nombre, motivo, ts(ahora()), JSON.stringify({ indemnEstimada: ind, pidioRol: por.rol })]);
+  await notificar(c, ap, null, ap === 'rrhh' ? 'Despido por revisar' : 'Despido por aprobar', `${u.nombre} · ${motivo}`);
+  await bitacora(c, por, { accion: 'despido.solicitar', elemento: u.usuario, motivo, despues: { indemnizacionEstimada: ind.monto }, sucursal: u.sucursal_id });
+  return { aprueba: ap === 'rrhh' ? 'Recursos Humanos y después el gerente general' : 'el gerente general', indemnizacion: ind };
+}
+
+/** Despido directo (solo el director): se crea la solicitud y se aplica de inmediato. */
 export async function despedirDirecto(c, u, por, motivo) {
   if (!puedeSobre(por, u)) throw fallo('No puedes despedir a esta persona');
   const bl = await despidoBloqueo(c, u);

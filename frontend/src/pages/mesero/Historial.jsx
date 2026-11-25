@@ -5,6 +5,7 @@ import { nom, donde, resumen, corr } from '../../lib/pedidos.js';
 import { imprimirTicket } from '../../lib/ticket.js';
 import { useDatos, useSesion, useAhora } from '../../context/Sesion.jsx';
 import { useDialogos } from '../../context/Dialogos.jsx';
+import { Form } from 'react-bootstrap';
 import { Btn, Card, Cargando, Chip, Err, Etapas, Fila, Panel, Pildoras, Stat, Stats, Stack, Vacio } from '../../components/ui.jsx';
 import { Documento } from '../../components/Pedido.jsx';
 import { DetallePedido, HojaSolicitud, bloqueos } from './comun.jsx';
@@ -25,18 +26,21 @@ function Pedidos() {
   const ahora = useAhora(60_000);
   const [per, setPer] = useState(hp);
   const [est, setEst] = useState(he);
+  const [bq, setBq] = useState('');
   const [ver, setVer] = useState(null);
   const [desde, hasta] = periodo(per, ahora);
   const { datos } = useDatos(`/mesero/pedidos?desde=${Math.floor(desde / 60000) * 60000}&hasta=${hasta}`);
   const { datos: sols } = useDatos('/mesero/solicitudes');
   if (!datos) return <Cargando />;
-  const ps = datos.filter(ESTADOS[est]);
+  const nb = bq.trim().toLowerCase().replace(/^#/, '');
+  const ps = datos.filter(ESTADOS[est]).filter((p) => !nb || String(p.num).includes(nb) || (p.ref || '').toLowerCase().includes(nb));
   const tv = ps.filter((p) => ['Entregado', 'Cobrado'].includes(p.estado) && !p.rep).reduce((a, p) => a + p.total, 0);
   const actual = ver && datos.find((p) => p.id === ver);
   return (
     <Stack>
       <Pildoras opciones={['Hoy', 'Ayer', '7 días', 'Todos']} valor={per} onChange={(k) => { hp = k; setPer(k); }} />
       <Pildoras opciones={Object.keys(ESTADOS)} valor={est} onChange={(k) => { he = k; setEst(k); }} />
+      <Form.Control type="search" placeholder="Buscar por número de pedido o nombre del cliente" value={bq} onChange={(e) => setBq(e.target.value)} className="tw:max-w-[380px]" aria-label="Buscar pedido" />
       <Stats><Stat l="Pedidos" v={ps.length} ic="list" tono="in" /><Stat l="Entregados o cobrados" v={$(tv)} ic="dollar" tono="ok" /></Stats>
       {ps.length ? ps.map((p) => {
         const tn = ['Entregado', 'Cobrado'].includes(p.estado) ? 'ok' : ['Cancelado', 'Rechazado'].includes(p.estado) ? 'er' : 'wa';
@@ -45,7 +49,7 @@ function Pedidos() {
             chips={<><Chip t={p.estado} o={tn} />{p.rep && <Chip t="Reposición" o="wa" />}</>} s={fmt(p.creado)}
             m={p.rechazo ? `Motivo: ${p.rechazo.motivo}` : p.estado === 'Cancelado' && p.motivo ? p.motivo : resumen(p)} der={$(p.total)} onClick={() => setVer(p.id)} />
         );
-      }) : <Vacio ic="receipt">No hiciste pedidos en este periodo</Vacio>}
+      }) : <Vacio ic="receipt">{bq ? 'Ningún pedido coincide con la búsqueda' : 'No hiciste pedidos en este periodo'}</Vacio>}
       {actual && <DetallePedido p={actual} solicitudes={sols} onHide={() => setVer(null)} />}
     </Stack>
   );
@@ -57,24 +61,30 @@ function Ventas() {
   const { config, usuario } = useSesion();
   const { accion } = useDialogos();
   const [rango, setRango] = useState(rg);
+  const [bq, setBq] = useState('');
+  const [metodo, setMetodo] = useState('Todos');
   const [ver, setVer] = useState(null);
   const [hoja, setHoja] = useState(false);
   const { datos } = useDatos(`/mesero/ventas?rango=${rango}`);
   const { datos: sols } = useDatos('/mesero/solicitudes');
   if (!datos) return <Cargando />;
-  const tv = datos.reduce((a, v) => a + v.total, 0);
-  const td = datos.reduce((a, v) => a + v.devuelto, 0);
+  const nb = bq.trim().toLowerCase().replace(/^#/, '');
+  const lista = datos.filter((x) => (metodo === 'Todos' || x.metodo === metodo) && (!nb || String(x.num).includes(nb) || corr(x).toLowerCase().includes(nb) || (x.ped?.ref || '').toLowerCase().includes(nb)));
+  const tv = lista.reduce((a, v) => a + v.total, 0);
+  const td = lista.reduce((a, v) => a + v.devuelto, 0);
   const v = ver && datos.find((x) => x.id === ver);
   const devDe = (id) => (sols || []).filter((x) => x.tipo === 'Devolución' && x.venta === id);
   return (
     <Stack>
       <Pildoras opciones={[['turno', 'Mi turno'], ['ayer', 'Ayer'], ['7d', '7 días']]} valor={rango} onChange={(k) => { rg = k; setRango(k); }} />
+      <Pildoras opciones={['Todos', 'Efectivo', 'Tarjeta', 'Bitcoin']} valor={metodo} onChange={setMetodo} />
+      <Form.Control type="search" placeholder="Buscar por ticket, documento o cliente" value={bq} onChange={(e) => setBq(e.target.value)} className="tw:max-w-[380px]" aria-label="Buscar venta" />
       <Stats>
         <Stat l="Ventas" v={$(tv)} ic="bag" tono="ok" />
         <Stat l="Devoluciones" v={$(td)} ic="receipt" tono="er" />
         <Stat l="Venta neta" v={$(tv - td)} ic="chart" tono="in" />
       </Stats>
-      {datos.length ? datos.map((x) => {
+      {lista.length ? lista.map((x) => {
         const so = devDe(x.id)[0];
         return <Fila key={x.id} ico="receipt" tono={so ? 'wa' : 'ok'} t={`Ticket #${x.num}`} chips={so && <Chip t={so.estado} o={tonoSol(so.estado)} />}
           s={fmt(x.fecha)} m={`${corr(x)} · ${x.metodo}`} der={$(x.total)} onClick={() => setVer(x.id)} />;

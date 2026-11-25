@@ -11,7 +11,7 @@ Origenessv/
 ├── database/
 │   ├── init/        01_schema.sql (esquema) · 02_seed.sql (datos demo); Docker los carga al crear la BD
 │   └── diagrama-er.md   Diagrama entidad-relación (Mermaid)
-├── Documentation/   (vacía por ahora)
+├── Documentation/   reglas-de-negocio.md: cómo se comporta el sistema (pedidos, fotos, sucursales, personal y renuncias)
 └── docker-compose.yml   db (PostgreSQL 16) · backend · frontend (Nginx)
 ```
 
@@ -28,6 +28,7 @@ Origenessv/
 - `app.js` monta las rutas; cada rol solo entra a las suyas (`soloRoles`). Con contraseña temporal solo se permite Perfil.
 - `routes/`: `auth`, `sistema` (reloj, pendientes, restablecer datos), `perfil`, `catalogo`, `mesero`, `cocina`, `propuestas`, `bodega`, `gerente`, `rrhh`, `gg`, `director` y `franquicia` (lo que comparten RR. HH., gerente general y director: proveedores, facturas, contraseñas).
 - `lib/`: reglas del negocio (`negocio` existencias, costos, tiempos, turnos; `compras`; `personal` niveles, despidos, indemnización y quincena; `nomina`; `proveedores`; `sucursales`; `panel` tableros), `procesos` (lo que mueve el reloj: precios semanales, llegadas de compras, lotes vencidos, ofertas, aumentos por antigüedad, avisos de stock, «precio por revisar», cierres ordenados), `permisos`, `clave` (clave de aprobaciones con 3 intentos) y `registro` (bitácora y avisos).
+- `uploads/` (fuera de Git): fotos que se suben desde la app. Las fotos de la demo van en `frontend/public/fotos/`.
 - `migraciones.js`: cambios de esquema idempotentes que se aplican al arrancar, para que una BD creada con una versión anterior quede igual a `01_schema.sql` sin perder datos.
 
 ### Base de datos
@@ -53,6 +54,8 @@ docker compose up -d db
 cd backend  && cp .env.example .env && npm install && npm run dev   # http://localhost:4000
 cd frontend && npm install && npm run dev                           # http://localhost:5173
 ```
+
+Las reglas de negocio que no son obvias (cocina, cancelaciones con cobro de insumos, mesas, reposiciones, menú, reclamos a proveedores, delivery, valoraciones, compra y cierre de sucursales, despidos y renuncias) están en [`Documentation/reglas-de-negocio.md`](Documentation/reglas-de-negocio.md).
 
 Para volver a los datos iniciales: botón **Restablecer datos** en la entrada, o `docker compose down -v` y volver a levantar.
 

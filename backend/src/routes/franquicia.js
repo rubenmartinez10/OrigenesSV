@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { q, tx, ts } from '../db.js';
 import { si, noEncontrado, prohibido, motivo as validarMotivo } from '../lib/errores.js';
 import { ahora } from '../lib/reloj.js';
+import { nombreValido, direccionValida } from '../lib/sucursales.js';
 import { bitacora } from '../lib/registro.js';
 import { r2, sum } from '../lib/negocio.js';
 import { ROLN } from '../lib/personal.js';
@@ -18,6 +19,39 @@ import {
  */
 const r = Router();
 const DB = { query: q };
+
+/* ---------- nombre y dirección de la sucursal (solo gerente general y director) ---------- */
+r.put('/sucursales/:id/datos', async (req, res) => {
+  if (!['gg', 'director'].includes(req.usuario.rol)) throw prohibido();
+  const out = await tx(async (c) => {
+    const { rows } = await c.query('SELECT id, nombre, direccion FROM sucursales WHERE id = $1 FOR UPDATE', [req.params.id]);
+    const s = rows[0];
+    si(!s, 'No se encontró la sucursal');
+    const nombre = await nombreValido(c, req.body?.nombre, s.id);
+    si(!nombre, 'Escribe el nombre de la sucursal');
+    const direccion = direccionValida(req.body?.direccion);
+    si(!direccion, 'Escribe la dirección del local');
+    si(nombre === s.nombre && direccion === s.direccion, 'No hay cambios que guardar');
+    await c.query('UPDATE sucursales SET nombre = $2, direccion = $3 WHERE id = $1', [s.id, nombre, direccion]);
+    const cambios = [nombre !== s.nombre && `Nombre: ${s.nombre} → ${nombre}`, direccion !== s.direccion && `Dirección: ${s.direccion || '—'} → ${direccion}`].filter(Boolean).join(' · ');
+    await c.query(`INSERT INTO sucursal_historial (sucursal_id, fecha, tipo, detalle, por) VALUES ($1,$2,'Cambio de datos',$3,$4)`, [s.id, ts(ahora()), cambios, req.usuario.nombre]);
+    await bitacora(c, req.usuario, { accion: 'sucursal.editar', elemento: nombre, antes: { nombre: s.nombre, direccion: s.direccion }, despues: { nombre, direccion }, sucursal: s.id });
+    return { nombre, direccion };
+  });
+  res.json(out);
+});
+
+/* ---------- foto de la sucursal (solo gerente general y director) ---------- */
+r.put('/sucursales/:id/foto', async (req, res) => {
+  if (!['gg', 'director'].includes(req.usuario.rol)) throw prohibido();
+  const url = req.body?.dataUrl ? await guardarImagen(req.body.dataUrl, 'sucursales', `s${+req.params.id}`) : null;
+  await tx(async (c) => {
+    const { rows } = await c.query('UPDATE sucursales SET foto_url = $2 WHERE id = $1 RETURNING nombre', [req.params.id, url]);
+    si(!rows[0], 'No se encontró la sucursal');
+    await bitacora(c, req.usuario, { accion: url ? 'foto.cambiar' : 'foto.quitar', elemento: rows[0].nombre, motivo: 'sucursal' });
+  });
+  res.json({ ok: true, foto: url });
+});
 
 /* ---------- materias primas (para elegir qué ofrece un proveedor) ---------- */
 r.get('/materias', async (req, res) => {

@@ -7,6 +7,7 @@ import { cfg, r2, sum, recetas } from '../lib/negocio.js';
 import { minimosYStock } from '../lib/procesos.js';
 import { cargarCompras, cargarCompra, compraParaCambiar, cotizar, crearCompras, skuNuevo } from '../lib/compras.js';
 import { cargarSolicitudes } from '../lib/consultas.js';
+import { guardarImagen } from '../lib/fotos.js';
 
 /* Encargado de bodega · Inventario, Alertas, Compras, Recepción y Conteo físico */
 const r = Router();
@@ -96,6 +97,16 @@ r.put('/materias/:id', async (req, res) => {
     await bitacora(c, u, { accion: 'materia.editar', elemento: nombre, antes: antes[0], despues: { nombre, categorias: cats } });
   });
   res.json({ ok: true });
+});
+
+r.put('/materias/:id/foto', async (req, res) => {
+  const url = req.body?.dataUrl ? await guardarImagen(req.body.dataUrl, 'materias', `mp${+req.params.id}`) : null;
+  await tx(async (c) => {
+    const { rows } = await c.query('UPDATE materias_primas SET foto_url = $2 WHERE id = $1 RETURNING nombre', [req.params.id, url]);
+    si(!rows[0], 'No se encontró la materia prima');
+    await bitacora(c, req.usuario, { accion: url ? 'foto.cambiar' : 'foto.quitar', elemento: rows[0].nombre, motivo: 'materia prima' });
+  });
+  res.json({ ok: true, foto: url });
 });
 
 r.post('/materias/:id/inhabilitar', async (req, res) => {

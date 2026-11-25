@@ -29,11 +29,11 @@ function EquipoTab() {
       </div>
       {L.length ? <Tabla cols={['', 'Nombre', 'Rol', 'Turno', 'Salario', 'Estado']} filas={L.map((x) => ({
         onClick: () => setVer(x.id), celdas: [<Avatar u={x} size={34} />, x.nombre, x.rolNombre, x.sinTurno ? <Chip t="Sin turno" o="er" /> : x.turno || '—', $(x.salario),
-          <Chip t={x.despidoSolicitado ? 'Despido solicitado' : 'Activo'} o={x.despidoSolicitado ? 'wa' : 'ok'} />],
+          <Chip t={x.renuncia ? 'Renuncia presentada' : x.despidoSolicitado ? 'Despido solicitado' : 'Activo'} o={x.renuncia || x.despidoSolicitado ? 'wa' : 'ok'} />],
       }))} /> : <Vacio ic="users">No hay personas con ese filtro</Vacio>}
       {p && (
         <FichaPersona p={p} onHide={() => setVer(null)}
-          nota={p.puede ? 'Puedes cambiar su rol o despedirlo. Siempre debe quedar al menos una persona por rol. Para sumar personal, pídelo en la pestaña Plantilla.'
+          nota={p.puede ? 'Puedes cambiar su rol o solicitar su despido (lo revisa Recursos Humanos y lo aprueba el gerente general). Siempre debe quedar al menos una persona por rol. Para sumar personal, pídelo en la pestaña Plantilla.'
             : 'Solo puedes gestionar a quienes tienen un rol inferior al tuyo.'}
           pie={p.puede ? <AccionesPersonal p={p} base="/gerente/equipo" conClave salarios={datos.salarios} onListo={() => setVer(null)} /> : null} />
       )}

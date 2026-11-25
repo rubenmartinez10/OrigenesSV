@@ -68,7 +68,7 @@ export default function Login() {
       const r = await api.post('/auth/login', { rol, usuario: f.usuario, password: f.password, pin: esDirector ? f.pin : undefined });
       entrar(r);
       const u = r.usuario;
-      navigate(u.cambiarPass || u.cambiarPin ? `/${u.rol}/perfil` : `/${u.rol}/${u.entra}`);
+      navigate(u.cambiarPass || u.cambiarPin || u.reubicar ? `/${u.rol}/perfil` : `/${u.rol}/${u.entra}`);
     } catch (x) {
       setEr(x.message);
     } finally {

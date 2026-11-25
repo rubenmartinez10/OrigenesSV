@@ -1,9 +1,13 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Form } from 'react-bootstrap';
+import { api } from '../../lib/api.js';
 import { $ } from '../../lib/formato.js';
+import { leerFoto } from '../../lib/fotos.js';
 import { useDatos } from '../../context/Sesion.jsx';
-import { Btn, Card, Cargando, Kpi, Kv, Panel, Stack, Tabla, Vacio } from '../../components/ui.jsx';
+import { useDialogos } from '../../context/Dialogos.jsx';
+import { Btn, Card, Cargando, Foto, Kpi, Kv, Panel, Stack, Tabla, Vacio } from '../../components/ui.jsx';
 import { Barras, Tablero } from '../../components/Graficas.jsx';
+import { EditarSucursal } from '../../components/Franquicia.jsx';
 
 /* Director · 8.1 Ingresos (sin gastos ni utilidades: eso solo lo ven los gerentes) */
 const S = { v: '7', ord: 'ing', q: '', n: 10, abierta: true };
@@ -11,13 +15,29 @@ const norm = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,
 
 /** Detalle de una sucursal: ingresos, productos y categorías que más venden. */
 export function DetalleSucursal({ s, onHide }) {
+  const { accion } = useDialogos();
+  const archivo = useRef(null);
+  const [edit, setEdit] = useState(false);
+  const cambiar = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (f) accion(async () => api.put(`/franquicia/sucursales/${s.id}/foto`, { dataUrl: await leerFoto(f) }), 'Foto actualizada');
+  };
   return (
-    <Panel show onHide={onHide} titulo={s.nombre} ro>
-      <Kv pares={[['Zona', s.zona], ['Tamaño', s.tamanoNombre || s.tamano], ['Estado', s.estado], ['Ingresos', $(s.ingresos)], ['Personal activo', s.personal]]} />
+    <Panel show onHide={onHide} titulo={s.nombre}>
+      <Foto x={{ ...s, sede: true }} ampliar className="tw:w-full tw:h-44 tw:rounded-2xl" icono="tw:text-6xl" />
+      <div className="tw:flex tw:items-center tw:gap-2">
+        <Btn v="t" onClick={() => archivo.current.click()}>{s.foto ? 'Cambiar foto' : 'Agregar foto'}</Btn>
+        {s.foto && <Btn v="t" onClick={() => accion(() => api.put(`/franquicia/sucursales/${s.id}/foto`, {}), 'Foto quitada')}>Quitar</Btn>}
+        <input ref={archivo} type="file" accept="image/*" hidden onChange={cambiar} />
+        <span className="tw:flex-1" /><Btn v="t" onClick={() => setEdit(true)}>Editar nombre y dirección</Btn>
+      </div>
+      <Kv pares={[['Zona', s.zona], ['Dirección', s.direccion && s.direccion !== s.zona ? s.direccion : '—'], ['Tamaño', s.tamanoNombre || s.tamano], ['Estado', s.estado], ['Ingresos', $(s.ingresos)], ['Personal activo', s.personal]]} />
       <h4 className="tw:text-sm tw:m-0">Productos con más ingresos</h4>
       <Barras items={s.top} />
       <h4 className="tw:text-sm tw:m-0">Categorías</h4>
       <Barras items={s.cats} />
+      {edit && <EditarSucursal s={s} onHide={() => setEdit(false)} />}
     </Panel>
   );
 }

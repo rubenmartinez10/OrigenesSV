@@ -35,6 +35,7 @@ export function CompraResumen({ c, conSucursal }) {
       {d.rechazo && <Err>Rechazada por {d.rechazo.por}: {d.rechazo.motivo}</Err>}
       {d.cancelacion && c.estado === 'Cancelación en revisión' && <Ban>Cancelación en revisión del gerente general. Motivo: {d.cancelacion.motivo}</Ban>}
       {d.devolucion && c.estado === 'Devolución en revisión' && <Ban>Devolución en revisión del gerente general. Motivo: {d.devolucion.motivo}</Ban>}
+      {d.solDescuentoRes?.estado === 'Aplicado por el proveedor' && <Ban>El proveedor aplicó un {d.solDescuentoRes.tipo.toLowerCase()} de {$(d.solDescuentoRes.monto)} según su política. Motivo: {d.solDescuentoRes.motivo}</Ban>}
       {d.solDescuento && c.estado === 'Descuento en revisión' && <Ban>{d.solDescuento.tipo} de {$(d.solDescuento.monto)} en revisión del gerente general. Motivo: {d.solDescuento.motivo}</Ban>}
       {d.cancelada && <Err>Cancelada{d.cancelada.motivo ? `: ${d.cancelada.motivo}` : ''}</Err>}
       <Kv pares={[

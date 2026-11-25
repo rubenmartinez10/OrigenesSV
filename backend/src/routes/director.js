@@ -4,7 +4,7 @@ import { q, tx, ts } from '../db.js';
 import { si, noEncontrado, motivo as validarMotivo } from '../lib/errores.js';
 import { ahora, D, inicioDia } from '../lib/reloj.js';
 import { bitacora, notificar } from '../lib/registro.js';
-import { r2, costoPropuesta } from '../lib/negocio.js';
+import { r2, costoPropuesta, valoraciones, valDe } from '../lib/negocio.js';
 import { cargarSolicitudes } from '../lib/consultas.js';
 import { guardarImagen } from '../lib/fotos.js';
 import {
@@ -30,11 +30,11 @@ r.get('/ingresos', async (req, res) => {
   const a = v === '1' ? t : v === '7' ? t - 6 * D : t - 29 * D;
   const b = ahora() + 1;
   const L = await ventasRango(DB, null, a, b);
-  const { rows: sucs } = await q('SELECT id, nombre, zona, tamano, estado FROM sucursales ORDER BY id');
+  const { rows: sucs } = await q('SELECT id, nombre, zona, direccion, tamano, estado, foto_url AS foto FROM sucursales ORDER BY id');
   const filas = [];
   for (const s of sucs) {
     filas.push({
-      id: s.id, nombre: s.nombre, zona: s.zona, tamano: TAM[s.tamano], estado: s.estado, ingresos: totalDe(L, s.id), personal: (await activos(DB, s.id)).length,
+      id: s.id, nombre: s.nombre, zona: s.zona, direccion: s.direccion, foto: s.foto, tamano: TAM[s.tamano], estado: s.estado, ingresos: totalDe(L, s.id), personal: (await activos(DB, s.id)).length,
       top: (await ranking(DB, s.id, a, b, 'prod')).slice(0, 5), cats: (await ranking(DB, s.id, a, b, 'cat')).slice(0, 5),
     });
   }
@@ -181,11 +181,12 @@ r.get('/sucursales', async (req, res) => {
   const a = t - 29 * D;
   const b = ahora() + 1;
   const L = await ventasRango(DB, null, a, b);
-  const { rows } = await q('SELECT id, nombre, zona, tamano, estado FROM sucursales ORDER BY id');
+  const V = await valoraciones(DB);
+  const { rows } = await q('SELECT id, nombre, zona, direccion, tamano, estado, foto_url AS foto FROM sucursales ORDER BY id');
   const { rows: z } = await q('SELECT nombre FROM zonas ORDER BY nombre');
   const out = [];
   for (const s of rows) {
-    out.push({ ...s, tamanoNombre: TAM[s.tamano], ingresos: totalDe(L, s.id), personal: (await activos(DB, s.id)).length,
+    out.push({ ...s, ...valDe(V, s.id), tamanoNombre: TAM[s.tamano], ingresos: totalDe(L, s.id), personal: (await activos(DB, s.id)).length,
       top: (await ranking(DB, s.id, a, b, 'prod')).slice(0, 5), cats: (await ranking(DB, s.id, a, b, 'cat')).slice(0, 5) });
   }
   res.json({ sucursales: out, zonas: z.map((x) => x.nombre), tamanos: Object.entries(TAM).map(([id, nombre]) => ({ id, nombre })) });
@@ -202,7 +203,7 @@ r.post('/sucursales', async (req, res) => {
   const out = await tx(async (c) => {
     const [a, b] = await intervaloSuc(c, zona, tamano);
     si(!(+costo >= a && +costo <= b), 'Calcula el costo antes de crear la sucursal');
-    const s = await crearSucursal(c, { zona, tamano, costo: +costo });
+    const s = await crearSucursal(c, { zona, tamano, costo: +costo, nombre: req.body?.nombre, direccion: req.body?.direccion });
     await bitacora(c, u, { accion: 'sucursal.crear_director', elemento: s.nombre, despues: { zona, tamano, costo: +costo }, sucursal: s.sid });
     return s;
   });
@@ -319,8 +320,11 @@ r.post('/catalogo/:id/eliminar', async (req, res) => {
 r.get('/bitacora', async (req, res) => {
   const n = Math.min(500, Math.max(10, +req.query.n || 10));
   const filtro = `($1::text IS NULL OR b.rol_id = $1) AND ($2::int IS NULL OR b.sucursal_id = $2)
-    AND ($3::text IS NULL OR (b.accion || ' ' || COALESCE(b.elemento,'') || ' ' || b.usuario_nombre || ' ' || b.motivo) ILIKE '%' || $3 || '%')`;
-  const p = [req.query.rol || null, +req.query.suc || null, req.query.q ? String(req.query.q) : null];
+    AND ($3::text IS NULL OR (b.accion || ' ' || COALESCE(b.elemento,'') || ' ' || b.usuario_nombre || ' ' || b.motivo) ILIKE '%' || $3 || '%')
+    AND ($4::date IS NULL OR b.fecha >= ($4::date)::timestamp AT TIME ZONE 'America/El_Salvador')
+    AND ($5::date IS NULL OR b.fecha < (($5::date) + 1)::timestamp AT TIME ZONE 'America/El_Salvador')`;
+  const p = [req.query.rol || null, +req.query.suc || null, req.query.q ? String(req.query.q) : null,
+    /^\d{4}-\d{2}-\d{2}$/.test(req.query.desde || '') ? req.query.desde : null, /^\d{4}-\d{2}-\d{2}$/.test(req.query.hasta || '') ? req.query.hasta : null];
   const { rows: tot } = await q(`SELECT count(*)::int n FROM bitacora b WHERE ${filtro}`, p);
   const { rows } = await q(`SELECT b.*, s.nombre AS suc_nombre FROM bitacora b LEFT JOIN sucursales s ON s.id = b.sucursal_id WHERE ${filtro} ORDER BY b.fecha DESC, b.id DESC LIMIT ${n}`, p);
   const { rows: sc } = await q('SELECT id, nombre FROM sucursales ORDER BY id');

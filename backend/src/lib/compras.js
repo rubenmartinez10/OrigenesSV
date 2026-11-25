@@ -99,7 +99,9 @@ export async function crearCompras(c, s, items, u) {
   const grupos = {};
   for (const i of items) {
     si(!(+i.cant > 0), 'Cada cantidad debe ser mayor que 0');
-    (grupos[i.prov] ||= []).push(i);
+    si(!Number.isInteger(+i.prov) || !(+i.prov > 0), 'Elige el proveedor de cada materia prima');
+    si(!Number.isInteger(+i.mp) || !(+i.mp > 0), 'Elige la materia prima');
+    (grupos[+i.prov] ||= []).push(i);
   }
   const creadas = [];
   for (const [pid, lista] of Object.entries(grupos)) {

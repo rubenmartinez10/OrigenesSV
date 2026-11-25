@@ -7,7 +7,8 @@ import { Avatar, Btn, Campo, Kv, Mut, Panel } from './ui.jsx';
 
 /**
  * Cambiar rol o despedir a alguien de nivel inferior.
- * El gerente confirma con su clave y motivo; el director, con motivo.
+ * El gerente confirma con su clave y motivo, y el despido es una solicitud (Recursos Humanos y luego el gerente general);
+ * el director lo aplica directamente.
  */
 export function AccionesPersonal({ p, base, conClave, salarios, onListo }) {
   const { motivo, clave, accion, toast } = useDialogos();
@@ -25,15 +26,20 @@ export function AccionesPersonal({ p, base, conClave, salarios, onListo }) {
       (k) => api.post(`${base}/${p.id}/rol`, { ...k, rol }), 'Rol actualizado');
     if (r) { if (r.clave) setNuevaClave(r.clave); else onListo?.(); }
   };
+  const ind = p.indemnizacion;
+  const txtInd = ind ? ` Indemnización estimada: ${$(ind.monto)} (${ind.dias} días × ${$(ind.base)}, art. 58 del Código de Trabajo).` : '';
   const despedir = async () => {
-    const r = await pedir(`Despedir a ${p.nombre}. Se aplica de inmediato con su indemnización y se avisa a Recursos Humanos y a gerencia general.`,
-      (k) => api.post(`${base}/${p.id}/despedir`, k), 'Despido aplicado');
+    const r = conClave
+      ? await pedir(`Solicitar el despido de ${p.nombre}. Escribe la razón: primero la revisa Recursos Humanos y después la aprueba el gerente general. Sigue trabajando hasta que se apruebe.${txtInd}`,
+        (k) => api.post(`${base}/${p.id}/despedir`, k), 'Solicitud enviada a Recursos Humanos')
+      : await pedir(`Despedir a ${p.nombre}. Se aplica de inmediato con su indemnización y se avisa a Recursos Humanos y a gerencia general.${txtInd}`,
+        (k) => api.post(`${base}/${p.id}/despedir`, k), 'Despido aplicado');
     if (r) onListo?.();
   };
   return (
     <>
       <Btn onClick={() => (p.rolesDestino.length ? setCambio(p.rolesDestino[0].id) : toast('No hay roles a tu alcance para esta persona'))}>Cambiar rol</Btn>
-      <Btn v="red" onClick={despedir}>Despedir</Btn>
+      {p.despidoSolicitado ? <Btn disabled>Despido solicitado</Btn> : <Btn v="red" onClick={despedir}>{conClave ? 'Solicitar despido' : 'Despedir'}</Btn>}
       <Modal show={!!cambio} onHide={() => setCambio(null)} centered>
         <Modal.Body>
           <h3>Cambiar el rol de {p.nombre}</h3>
@@ -59,7 +65,7 @@ export function AccionesPersonal({ p, base, conClave, salarios, onListo }) {
 /** Ficha de una persona del equipo. */
 export function FichaPersona({ p, pie, nota, onHide }) {
   return (
-    <Panel show onHide={onHide} titulo={p.nombre} estado={p.despidoSolicitado ? 'Despido solicitado' : p.estado} ro={!pie} pie={pie}>
+    <Panel show onHide={onHide} titulo={p.nombre} estado={p.renuncia ? 'Renuncia presentada' : p.despidoSolicitado ? 'Despido solicitado' : p.estado} ro={!pie} pie={pie}>
       <div className="tw:flex tw:items-center tw:gap-4"><Avatar u={p} size={88} /><b>{p.nombre}</b></div>
       <Kv pares={[
         ['Rol', p.rolNombre], ['Turno de hoy', p.sinTurno ? 'Sin turno asignado' : p.turno || '—'], ['Salario mensual', $(p.salario)],

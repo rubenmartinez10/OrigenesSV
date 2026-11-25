@@ -1,3 +1,4 @@
+import { randomUUID, createHash } from 'node:crypto';
 import { Router } from 'express';
 import { q, tx, ts } from '../db.js';
 import { fallo, si, noEncontrado, motivo as validarMotivo, HttpError } from '../lib/errores.js';
@@ -5,9 +6,10 @@ import { ahora, D, inicioDia } from '../lib/reloj.js';
 import { bitacora, notificar } from '../lib/registro.js';
 import { exigir } from '../lib/permisos.js';
 import {
-  cfg, r2, sum, recetas, uso, cabe, disponibles, estimado, ofertasActivas, precioCon, mesasOcupadas, costoReservas,
+  cfg, r2, sum, esperaCola, recetas, uso, cabe, disponibles, estimado, ofertasActivas, precioCon, mesasOcupadas, mesaReusable, costoReservas,
+  turnosDe, ventanaTurno, textoTurno, MARGEN_TURNO_MIN, revisarCajasPasadas,
 } from '../lib/negocio.js';
-import { cargarPedidos, cargarPedido, cargarSolicitudes, cargarVentas } from '../lib/consultas.js';
+import { cargarPedidos, cargarPedido, cargarSolicitudes, cargarVentas, comoCargo } from '../lib/consultas.js';
 
 const r = Router();
 const EN_CURSO = ['Creado', 'Aceptado', 'Asignado', 'Preparando', 'Listo'];
@@ -27,7 +29,11 @@ async function miPedido(c, u, id) {
 r.get('/pedidos', async (req, res) => {
   const u = req.usuario;
   if (req.query.porCobrar) {
-    return res.json(await cargarPedidos({ query: q }, `p.mesero_id = $1 AND p.estado = 'Entregado' AND p.reposicion_de IS NULL`, [u.id], 'p.entregado'));
+    const L = await cargarPedidos({ query: q },
+      `p.mesero_id = $1 AND p.reposicion_de IS NULL AND (p.tipo <> 'Aquí' OR p.cuenta_pedida IS NOT NULL)
+       AND (p.estado = 'Entregado' OR (p.estado = 'Cancelado' AND p.cargo_cancel > 0 AND NOT EXISTS (SELECT 1 FROM ventas v WHERE v.pedido_id = p.id)))`,
+      [u.id], 'COALESCE(p.entregado, p.cancelado)');
+    return res.json(L.map(comoCargo));
   }
   if (req.query.abiertos) {
     return res.json(await cargarPedidos({ query: q },
@@ -47,6 +53,12 @@ r.post('/pedidos', async (req, res) => {
   const s = u.sucursal;
   exigir(u, 'pedido', 'pide', s);
   const { tipo, mesa, ref, lineas } = req.body || {};
+  const direccion = String(req.body?.direccion || '').trim();
+  const telefono = String(req.body?.telefono || '').replace(/\s|-/g, '');
+  if (tipo === 'Delivery') {
+    si(direccion.length < 10, 'Escribe la dirección de entrega completa (colonia, calle y referencia)');
+    si(!/^[267]\d{7}$/.test(telefono), 'Teléfono inválido: 8 dígitos que empiecen con 2, 6 o 7');
+  }
   si(!['Aquí', 'Llevar', 'Delivery'].includes(tipo), 'Tipo de pedido inválido');
   const cliente = String(ref || '').trim();
   si(!cliente, 'Escribe el nombre del cliente');
@@ -55,13 +67,20 @@ r.post('/pedidos', async (req, res) => {
   const pedido = await tx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(1000 + $1)', [s]); // un pedido a la vez por sucursal (mesas e inventario)
     const k = await cfg(c);
+    const { rows: sucE } = await c.query('SELECT estado FROM sucursales WHERE id = $1', [s]);
+    si(sucE[0]?.estado !== 'Operando', 'Esta sucursal está en cierre y no recibe pedidos nuevos');
     if (tipo === 'Aquí') {
       const oc = await mesasOcupadas(c, s);
       const { rows } = await c.query('SELECT mesas FROM sucursales WHERE id = $1', [s]);
-      si(rows[0].mesas - Object.keys(oc).length <= 0, 'Todas las mesas están ocupadas');
       si(!mesa, 'Elige la mesa del cliente');
       si(!(mesa >= 1 && mesa <= rows[0].mesas), 'Mesa inválida');
-      si(oc[mesa], 'Esa mesa ya está ocupada');
+      if (mesaReusable(oc[mesa])) {
+        // el cliente de un pedido cancelado o rechazado sigue en la mesa y pide de nuevo: la mesa pasa al pedido nuevo
+        await c.query('UPDATE pedidos SET mesa_liberada = $2 WHERE id = $1', [oc[mesa].id, ts(ahora())]);
+        delete oc[mesa];
+      }
+      si(rows[0].mesas - Object.keys(oc).length <= 0, 'Todas las mesas están ocupadas');
+      si(oc[mesa], oc[mesa]?.estado === 'Cancelado' ? 'En esa mesa hay un pedido cancelado por cobrar' : 'Esa mesa ya está ocupada');
     }
     const { rows: prods } = await c.query(
       `SELECT p.id, p.nombre, p.precio, p.tiempo_min AS tiempo, p.estado, p.es_extra,
@@ -84,12 +103,13 @@ r.post('/pedidos', async (req, res) => {
     const u2 = uso(norm, rec);
     const { disp } = await disponibles(c, s);
     si(!cabe(u2, disp), 'No alcanzan los insumos para el pedido');
-    const est = estimado(norm, P, k);
-    const total = r2(sum(norm, (l) => l.cant * l.unit));
+    const est = estimado(norm, P, k) + await esperaCola(c, s, k);
+    const envio = tipo === 'Delivery' ? r2(k.envio_delivery) : 0;
+    const total = r2(sum(norm, (l) => l.cant * l.unit) + envio);
     const { rows: ins } = await c.query(
-      `INSERT INTO pedidos (sucursal_id, mesero_id, tipo, mesa, cliente, estado, total, est_seg, creado)
-       VALUES ($1,$2,$3,$4,$5,'Creado',$6,$7,$8) RETURNING id, num`,
-      [s, u.id, tipo, tipo === 'Aquí' ? mesa : null, cliente, total, est, ts(ahora())]);
+      `INSERT INTO pedidos (sucursal_id, mesero_id, tipo, mesa, cliente, estado, total, est_seg, creado, direccion, telefono, envio)
+       VALUES ($1,$2,$3,$4,$5,'Creado',$6,$7,$8,$9,$10,$11) RETURNING id, num`,
+      [s, u.id, tipo, tipo === 'Aquí' ? mesa : null, cliente, total, est, ts(ahora()), tipo === 'Delivery' ? direccion : null, tipo === 'Delivery' ? telefono : null, envio]);
     const { id, num } = ins[0];
     for (const [i, l] of norm.entries()) {
       const { rows: ln } = await c.query(
@@ -115,6 +135,22 @@ r.post('/pedidos/:id/entregar', async (req, res) => {
     si(p.estado !== 'Listo', 'El pedido aún no está listo');
     await c.query(`UPDATE pedidos SET estado = 'Entregado', entregado = $2 WHERE id = $1`, [p.id, ts(ahora())]);
     await bitacora(c, u, { accion: 'pedido.entregar', elemento: `Pedido #${p.num}`, sucursal: p.sucursal_id });
+  });
+  res.json({ ok: true });
+});
+
+/** El cliente de mesa ya se va: desde aquí se puede cobrar (llevar y delivery se cobran al entregar). */
+r.post('/pedidos/:id/retira', async (req, res) => {
+  const u = req.usuario;
+  exigir(u, 'pedido', 'pide', u.sucursal);
+  await tx(async (c) => {
+    const p = await miPedido(c, u, req.params.id);
+    si(p.tipo !== 'Aquí', 'Solo los pedidos para comer aquí esperan a que el cliente se retire');
+    const cargo = p.estado === 'Cancelado' && +p.cargo_cancel > 0;
+    si((p.estado !== 'Entregado' && !cargo) || p.reposicion_de, 'El pedido debe estar entregado');
+    si(p.cuenta_pedida, 'Ya se marcó que el cliente se retira');
+    await c.query('UPDATE pedidos SET cuenta_pedida = $2 WHERE id = $1', [p.id, ts(ahora())]);
+    await bitacora(c, u, { accion: 'pedido.retira', elemento: `Pedido #${p.num}`, sucursal: p.sucursal_id });
   });
   res.json({ ok: true });
 });
@@ -188,7 +224,10 @@ r.post('/pedidos/:id/solicitudes', async (req, res) => {
         `SELECT tipo FROM solicitudes WHERE pedido_id = $1 AND linea_orden = $2 AND tipo IN ($3, $4) AND estado <> 'Rechazada'`, [p.id, linea, veto, tipo]);
       si(choque.rows.some((x) => x.tipo === veto), `Ese platillo ya tiene una ${veto === 'Devolución' ? 'devolución' : 'reposición'}`);
       si(choque.rows.some((x) => x.tipo === tipo), 'Ese platillo ya tiene una solicitud igual');
-      if (tipo === 'Reposición') si(!['Entregado', 'Cobrado'].includes(p.estado), 'El pedido aún no se ha entregado');
+      if (tipo === 'Reposición') {
+        si(p.estado === 'Cobrado', 'El pedido ya se cobró: después del cobro no se reponen platillos');
+        si(p.estado !== 'Entregado', 'El pedido aún no se ha entregado');
+      }
       if (tipo === 'Devolución') {
         const { rows: v } = await c.query('SELECT id FROM ventas WHERE pedido_id = $1', [p.id]);
         si(!v[0], 'El pedido aún no se ha cobrado');
@@ -241,7 +280,9 @@ r.post('/mesas/:pedido/liberar', async (req, res) => {
   exigir(u, 'pedido', 'pide', u.sucursal);
   await tx(async (c) => {
     const p = await pedidoEnMesa(c, u, req.params.pedido);
-    si(p.estado !== 'Cobrado', `Cobra el pedido #${p.num} antes de liberar la mesa`);
+    const pendiente = p.estado === 'Cancelado' && +p.cargo_cancel > 0 && !(await c.query('SELECT 1 FROM ventas WHERE pedido_id = $1', [p.id])).rowCount;
+    si(!['Cobrado', 'Cancelado', 'Rechazado'].includes(p.estado) || pendiente,
+      pendiente ? `Cobra los insumos del pedido cancelado #${p.num} antes de liberar la mesa` : `Cobra el pedido #${p.num} antes de liberar la mesa`);
     await c.query('UPDATE pedidos SET mesa_liberada = $2 WHERE id = $1', [p.id, ts(ahora())]);
     await bitacora(c, u, { accion: 'mesa.liberar', elemento: `Mesa ${p.mesa} · #${p.num}`, sucursal: u.sucursal });
   });
@@ -261,17 +302,53 @@ async function totalesCaja(c, caja) {
 
 const cajaJson = (k) => ({
   id: k.id, fondo: k.fondo, estado: k.estado, abierta: k.abierta, cerrada: k.cerrada, declarado: k.declarado,
+  tardeMin: k.tarde_min, fueraTurno: k.fuera_turno, turnoFin: k.turno_fin, pasadaMin: k.turno_fin && k.estado === 'Abierta' && ahora() > k.turno_fin ? Math.round((ahora() - k.turno_fin) / 60e3) : 0,
   esp: k.esp_efectivo == null ? null : { Efectivo: k.esp_efectivo, Tarjeta: k.esp_tarjeta, Bitcoin: k.esp_bitcoin }, comentario: k.comentario,
 });
 
+/** Turno del mesero ahora mismo + su solicitud de apertura fuera de turno (si la hay). */
+async function contextoTurno(c, u) {
+  const tu = (await turnosDe(c, [u.id]))[u.id];
+  const v = ventanaTurno(tu);
+  const { rows } = await c.query(
+    `SELECT id, estado, motivo, rechazo FROM solicitudes WHERE tipo = 'Apertura de caja' AND solicitante_id = $1 AND estado IN ('Solicitada','Aprobada','Rechazada')
+      ORDER BY id DESC LIMIT 1`, [u.id]);
+  return { v, texto: textoTurno(tu), solicitud: rows[0] || null };
+}
+
 r.get('/caja', async (req, res) => {
   const u = req.usuario;
+  await tx((c) => revisarCajasPasadas(c, u.sucursal));
   const { rows } = await q('SELECT * FROM cajas WHERE mesero_id = $1 ORDER BY id DESC', [u.id]);
   const abierta = rows.find((k) => k.estado === 'Abierta');
+  const ct = await contextoTurno({ query: q }, u);
   res.json({
     abierta: abierta ? { ...cajaJson(abierta), ...(await totalesCaja({ query: q }, abierta)) } : null,
     cierres: rows.filter((k) => k.estado !== 'Abierta').sort((a, b) => b.cerrada - a.cerrada).map(cajaJson),
+    turno: { texto: ct.texto, dentro: !!ct.v, ini: ct.v?.ini ?? null, fin: ct.v?.fin ?? null, margen: MARGEN_TURNO_MIN },
+    solicitud: ct.solicitud && { id: ct.solicitud.id, estado: ct.solicitud.estado, motivo: ct.solicitud.motivo, rechazo: ct.solicitud.rechazo },
   });
+});
+
+/** Fuera de turno no se abre caja directo: se pide autorización al gerente. */
+r.post('/caja/solicitar-apertura', async (req, res) => {
+  const u = req.usuario;
+  exigir(u, 'pedido', 'pide', u.sucursal);
+  const m = validarMotivo(req.body?.motivo);
+  await tx(async (c) => {
+    const ct = await contextoTurno(c, u);
+    si(ct.v, 'Estás dentro de tu turno: abre la caja directamente');
+    const ya = await c.query(`SELECT 1 FROM solicitudes WHERE tipo = 'Apertura de caja' AND solicitante_id = $1 AND estado IN ('Solicitada','Aprobada')`, [u.id]);
+    si(ya.rowCount, 'Ya tienes una solicitud de apertura en curso');
+    const ab = await c.query(`SELECT 1 FROM cajas WHERE mesero_id = $1 AND estado = 'Abierta'`, [u.id]);
+    si(ab.rowCount, 'Ya tienes una caja abierta');
+    await c.query(
+      `INSERT INTO solicitudes (tipo, estado, sucursal_id, solicitante_id, aprueba_rol, motivo, fecha) VALUES ('Apertura de caja','Solicitada',$1,$2,'gerente',$3,$4)`,
+      [u.sucursal, u.id, m, ts(ahora())]);
+    await notificar(c, 'gerente', u.sucursal, 'Apertura de caja fuera de turno', `${u.nombre} pide abrir su caja (turno: ${ct.texto})`, true);
+    await bitacora(c, u, { accion: 'caja.solicitar_apertura', elemento: u.usuario, motivo: m, sucursal: u.sucursal });
+  });
+  res.json({ ok: true });
 });
 
 r.post('/caja/abrir', async (req, res) => {
@@ -282,8 +359,24 @@ r.post('/caja/abrir', async (req, res) => {
   await tx(async (c) => {
     const ya = await c.query(`SELECT 1 FROM cajas WHERE mesero_id = $1 AND estado = 'Abierta'`, [u.id]);
     si(ya.rowCount, 'Ya tienes una caja abierta');
-    await c.query(`INSERT INTO cajas (sucursal_id, mesero_id, fondo, estado, abierta) VALUES ($1,$2,$3,'Abierta',$4)`, [u.sucursal, u.id, r2(fondo), ts(ahora())]);
-    await bitacora(c, u, { accion: 'caja.abrir', elemento: u.usuario, sucursal: u.sucursal });
+    const ct = await contextoTurno(c, u);
+    const t = ahora();
+    let tarde = 0, fuera = false, fin = null;
+    if (ct.v) {
+      tarde = t - ct.v.ini > MARGEN_TURNO_MIN * 60e3 ? Math.round((t - ct.v.ini) / 60e3) : 0;
+      fin = ct.v.fin;
+    } else {
+      const { rows } = await c.query(`SELECT id FROM solicitudes WHERE tipo = 'Apertura de caja' AND solicitante_id = $1 AND estado = 'Aprobada' ORDER BY id DESC LIMIT 1 FOR UPDATE`, [u.id]);
+      if (!rows[0]) throw new HttpError(409, `Estás fuera de tu turno (${ct.texto}). Pide autorización al gerente para abrir la caja`, { fueraDeTurno: true });
+      await c.query(`UPDATE solicitudes SET estado = 'Usada' WHERE id = $1`, [rows[0].id]);
+      fuera = true;
+    }
+    await c.query(
+      `INSERT INTO cajas (sucursal_id, mesero_id, fondo, estado, abierta, tarde_min, fuera_turno, turno_fin) VALUES ($1,$2,$3,'Abierta',$4,$5,$6,$7)`,
+      [u.sucursal, u.id, r2(fondo), ts(t), tarde, fuera, ts(fin)]);
+    if (tarde) await notificar(c, 'gerente', u.sucursal, 'Caja abierta tarde', `${u.nombre} abrió la caja ${tarde} min después del inicio de su turno`, true);
+    if (fuera) await notificar(c, 'gerente', u.sucursal, 'Caja abierta fuera de turno', `${u.nombre} abrió la caja con tu autorización`, true);
+    await bitacora(c, u, { accion: 'caja.abrir', elemento: u.usuario, sucursal: u.sucursal, motivo: tarde ? `Tarde ${tarde} min` : fuera ? 'Fuera de turno autorizado' : '' });
   });
   res.json({ ok: true });
 });
@@ -340,8 +433,11 @@ r.post('/cobrar', async (req, res) => {
     const { rows: cj } = await c.query(`SELECT id FROM cajas WHERE mesero_id = $1 AND estado = 'Abierta'`, [u.id]);
     si(!cj[0], 'Abre tu caja para cobrar');
     const p = await miPedido(c, u, b.pedidoId);
-    si(p.estado !== 'Entregado' || p.reposicion_de, 'Ese pedido no está por cobrar');
-    const total = p.total;
+    const cargo = p.estado === 'Cancelado' && +p.cargo_cancel > 0;
+    if (cargo) si((await c.query('SELECT 1 FROM ventas WHERE pedido_id = $1', [p.id])).rowCount, 'Ese cargo ya se cobró');
+    si((p.estado !== 'Entregado' && !cargo) || p.reposicion_de, 'Ese pedido no está por cobrar');
+    si(p.tipo === 'Aquí' && !p.cuenta_pedida, 'Cobra cuando el cliente se retire: marca «El cliente se retira» en el pedido');
+    const total = cargo ? r2(+p.cargo_cancel) : p.total;
     const propina = r2((total * pct) / 100);
     const T = r2(total + propina);
     let pago = {};
@@ -381,17 +477,36 @@ r.post('/cobrar', async (req, res) => {
     await c.query('SELECT pg_advisory_xact_lock(2000 + $1)', [p.sucursal_id]); // correlativo sin huecos ni repetidos
     const { rows: cr } = await c.query('SELECT COALESCE(max(correlativo), 0) + 1 AS n FROM ventas WHERE sucursal_id = $1 AND tipo_doc = $2', [p.sucursal_id, b.tipoDoc]);
     const sub = r2(total / (1 + k.iva_pct / 100));
+    const codigo = randomUUID().toUpperCase();
+    const sello = createHash('sha256').update(codigo + ts(ahora())).digest('hex').slice(0, 40).toUpperCase();
     const { rows: v } = await c.query(
       `INSERT INTO ventas (sucursal_id, pedido_id, mesero_id, caja_id, fecha, metodo, referencia, pago, propina, tipo_doc, correlativo,
-                           fis_nombre, fis_nit, fis_nrc, total, subtotal, iva)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+                           fis_nombre, fis_nit, fis_nrc, total, subtotal, iva, codigo_generacion, sello)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id`,
       [p.sucursal_id, p.id, u.id, cj[0].id, ts(ahora()), b.metodo, ref, JSON.stringify(pago), propina, b.tipoDoc, cr[0].n,
-        fis?.nombre ?? null, fis?.nit ?? null, fis?.nrc ?? null, total, sub, r2(total - sub)]);
-    await c.query(`UPDATE pedidos SET estado = 'Cobrado' WHERE id = $1`, [p.id]);
+        fis?.nombre ?? null, fis?.nit ?? null, fis?.nrc ?? null, total, sub, r2(total - sub), codigo, sello]);
+    if (!cargo) await c.query(`UPDATE pedidos SET estado = 'Cobrado' WHERE id = $1`, [p.id]); // un cancelado sigue «Cancelado», con su venta del cargo
     await bitacora(c, u, { accion: 'venta.cobrar', elemento: `Pedido #${p.num}`, sucursal: p.sucursal_id });
     return (await cargarVentas(c, 'v.id = $1', [v[0].id]))[0];
   });
   res.status(201).json(venta);
+});
+
+r.get('/pedidos/:id/venta', async (req, res) => {
+  const v = (await cargarVentas({ query: q }, 'v.pedido_id = $1 AND v.mesero_id = $2', [req.params.id, req.usuario.id]))[0];
+  si(!v, 'Este pedido aún no está cobrado');
+  res.json(v);
+});
+
+/** Valoración opcional del cliente (1 a 5 estrellas), una sola vez, justo después del pago. */
+r.post('/ventas/:id/valorar', async (req, res) => {
+  const u = req.usuario;
+  exigir(u, 'pedido', 'pide', u.sucursal);
+  const n = Number(req.body?.estrellas);
+  si(!Number.isInteger(n) || n < 1 || n > 5, 'Elige de 1 a 5 estrellas');
+  const { rowCount } = await q(`UPDATE ventas SET estrellas = $3 WHERE id = $1 AND mesero_id = $2 AND estrellas IS NULL`, [req.params.id, u.id, n]);
+  si(!rowCount, 'Esta venta ya fue valorada o no es tuya');
+  res.json({ ok: true });
 });
 
 /* ---------- historial de ventas: mi turno, ayer o 7 días ---------- */

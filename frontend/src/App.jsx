@@ -16,7 +16,7 @@ function Pantalla({ perfil }) {
   const { rol, item: itemId, tab: tabId } = useParams();
   const R = ROLES[usuario.rol];
   if (rol !== usuario.rol) return <Navigate to={`/${usuario.rol}/${R.entra}`} replace />;
-  if ((usuario.cambiarPass || usuario.cambiarPin) && !perfil) return <Navigate to={`/${rol}/perfil`} replace />;
+  if ((usuario.cambiarPass || usuario.cambiarPin || usuario.reubicar) && !perfil) return <Navigate to={`/${rol}/perfil`} replace />;
   if (perfil) return <Shell rol={rol} item={PERFIL}><Perfil /></Shell>;
   const item = R.menu.find((m) => m.id === itemId);
   if (!item) return <Navigate to={`/${rol}/${R.entra}`} replace />;
@@ -58,7 +58,7 @@ export default function App() {
         <Routes>
           <Route path="/:rol/perfil" element={<Pantalla perfil />} />
           <Route path="/:rol/:item/:tab?" element={<Pantalla />} />
-          <Route path="*" element={<Navigate to={usuario.cambiarPass || usuario.cambiarPin ? `/${usuario.rol}/perfil` : `/${usuario.rol}/${usuario.entra}`} replace />} />
+          <Route path="*" element={<Navigate to={usuario.cambiarPass || usuario.cambiarPin || usuario.reubicar ? `/${usuario.rol}/perfil` : `/${usuario.rol}/${usuario.entra}`} replace />} />
         </Routes>
       )}
     </>

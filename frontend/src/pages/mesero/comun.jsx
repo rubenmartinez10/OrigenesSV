@@ -85,7 +85,8 @@ export function DetallePedido({ p, solicitudes, onHide }) {
   }
   if (['Entregado', 'Cobrado'].includes(p.estado) && !p.rep) pie.push(<Btn key="r" onClick={() => setHoja(true)}>Solicitar reposición</Btn>);
   if (demora(p, ahora, config)) pie.push(<Btn key="d" v="red" onClick={() => cancelarDemora(p, onHide)}>Cancelar por demora</Btn>);
-  if (['Entregado', 'Cobrado'].includes(p.estado)) pie.push(<Btn key="t" v="t" onClick={() => imprimirTicket(p, null, usuario.sucursalNombre, config?.iva)}>Imprimir ticket</Btn>);
+  // el ticket solo existe cuando el pedido ya se pagó (lleva el documento fiscal)
+  if (p.estado === 'Cobrado') pie.push(<Btn key="t" v="t" onClick={async () => { const v = await api.get(`/mesero/pedidos/${p.id}/venta`); imprimirTicket(p, v, usuario.sucursalNombre, config?.iva); }}>Imprimir ticket</Btn>);
 
   return (
     <>
