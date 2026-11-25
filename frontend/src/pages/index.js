@@ -1,0 +1,48 @@
+import { lazy } from 'react';
+
+/*
+ * Pantalla de cada entrada del menú («rol/entrada»). Se cargan por separado (React.lazy):
+ * cada rol descarga solo el código de sus pantallas.
+ */
+export const PAGINAS = {
+  'mesero/nuevo': lazy(() => import('./mesero/NuevoPedido.jsx')),
+  'mesero/pedidos': lazy(() => import('./mesero/MisPedidos.jsx')),
+  'mesero/mesas': lazy(() => import('./mesero/Mesas.jsx')),
+  'mesero/cobro': lazy(() => import('./mesero/Cobro.jsx')),
+  'mesero/caja': lazy(() => import('./mesero/MiCaja.jsx')),
+  'mesero/historial': lazy(() => import('./mesero/Historial.jsx')),
+  'cocinero/mipedido': lazy(() => import('./cocinero/MiPedido.jsx')),
+  'cocinero/proponer': lazy(() => import('./cocinero/Proponer.jsx')),
+  'cocinero/historial': lazy(() => import('./cocinero/Historial.jsx')),
+  'jefe/cola': lazy(() => import('./jefe/ColaPedidos.jsx')),
+  'jefe/vivo': lazy(() => import('./jefe/CocinaEnVivo.jsx')),
+  'jefe/reposiciones': lazy(() => import('./jefe/Reposiciones.jsx')),
+  'jefe/recetas': lazy(() => import('./jefe/Recetas.jsx')),
+  'jefe/historial': lazy(() => import('./jefe/Historial.jsx')),
+  'bodega/inventario': lazy(() => import('./bodega/Inventario.jsx')),
+  'bodega/alertas': lazy(() => import('./bodega/Alertas.jsx')),
+  'bodega/compras': lazy(() => import('./bodega/Compras.jsx')),
+  'bodega/recepcion': lazy(() => import('./bodega/Recepcion.jsx')),
+  'bodega/conteo': lazy(() => import('./bodega/Conteo.jsx')),
+  'gerente/resumen': lazy(() => import('./gerente/Resumen.jsx')),
+  'gerente/aprobaciones': lazy(() => import('./gerente/Aprobaciones.jsx')),
+  'gerente/menu': lazy(() => import('./gerente/Menu.jsx')),
+  'gerente/mermas': lazy(() => import('./gerente/Mermas.jsx')),
+  'gerente/pedir': lazy(() => import('./gerente/Pedir.jsx')),
+  'gerente/equipo': lazy(() => import('./gerente/Equipo.jsx')),
+  'rrhh/personal': lazy(() => import('./rrhh/Personal.jsx')),
+  'rrhh/roles': lazy(() => import('./rrhh/Roles.jsx')),
+  'rrhh/turnos': lazy(() => import('./rrhh/Turnos.jsx')),
+  'rrhh/pagos': lazy(() => import('./rrhh/Pagos.jsx')),
+  'rrhh/proveedores': lazy(() => import('./rrhh/Proveedores.jsx')),
+  'gg/panel': lazy(() => import('./gg/Panel.jsx')),
+  'gg/aprobaciones': lazy(() => import('./gg/Aprobaciones.jsx')),
+  'gg/productos': lazy(() => import('./gg/Productos.jsx')),
+  'gg/dinero': lazy(() => import('./gg/Dinero.jsx')),
+  'gg/sucursales': lazy(() => import('./gg/Sucursales.jsx')),
+  'director/ingresos': lazy(() => import('./director/Ingresos.jsx')),
+  'director/aprobaciones': lazy(() => import('./director/Aprobaciones.jsx')),
+  'director/franquicia': lazy(() => import('./director/Franquicia.jsx')),
+  'director/directores': lazy(() => import('./director/Directores.jsx')),
+  'director/bitacora': lazy(() => import('./director/Bitacora.jsx')),
+};
