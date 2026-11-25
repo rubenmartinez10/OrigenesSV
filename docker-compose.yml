@@ -1,0 +1,61 @@
+name: origenes-sv
+
+services:
+  # Base de datos PostgreSQL. La primera vez carga database/init/*.sql (esquema + datos demo).
+  db:
+    image: postgres:16-alpine
+    container_name: origenes-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-origenes}
+      POSTGRES_USER: ${DB_USER:-origenes}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-origenes}
+      TZ: America/El_Salvador
+      PGTZ: America/El_Salvador
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-origenes} -d ${DB_NAME:-origenes}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # API REST (Node + Express)
+  backend:
+    build: ./backend
+    container_name: origenes-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgres://${DB_USER:-origenes}:${DB_PASSWORD:-origenes}@db:5432/${DB_NAME:-origenes}
+      JWT_SECRET: ${JWT_SECRET:-cambia-este-secreto}
+      CORS_ORIGIN: http://localhost:${WEB_PORT:-8080}
+      TZ: America/El_Salvador
+      DEMO: ${DEMO:-true}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SQL_DIR: /app/sql
+    ports:
+      - "${API_PORT:-4000}:4000"
+    volumes:
+      - uploads:/app/uploads
+      - ./database/init:/app/sql:ro
+
+  # Interfaz web (React + Vite compilado y servido por Nginx, que reenvía /api al backend)
+  frontend:
+    build: ./frontend
+    container_name: origenes-web
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  pgdata:
+  uploads:
